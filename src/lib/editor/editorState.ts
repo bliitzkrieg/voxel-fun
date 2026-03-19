@@ -1,0 +1,138 @@
+import type { VoxelHit } from '$lib/voxel/voxelRaycast';
+import type { WorldBox, WorldCoord } from '$lib/voxel/voxelTypes';
+import { DEFAULT_SELECTED_VOXEL_ID } from '$lib/voxel/voxelPalette';
+
+export type EditorToolType =
+	| 'brush-add'
+	| 'brush-remove'
+	| 'brush-paint'
+	| 'box-fill'
+	| 'box-hollow'
+	| 'box-carve'
+	| 'box-paint';
+
+export type EditorMode = 'add' | 'remove' | 'paint';
+export type BoxConstraint = 'free' | 'horizontal' | 'vertical-x' | 'vertical-z';
+export type BoxToolMode = 'solid' | 'hollow' | 'carve' | 'paint';
+export type DragMode = 'single' | 'region';
+
+export interface EditorState {
+	enabled: boolean;
+	activeTool: EditorToolType;
+	selectedVoxelId: number;
+	dragStart: WorldCoord | null;
+	hoverHit: VoxelHit | null;
+	mode: EditorMode;
+	boxConstraint: BoxConstraint;
+	previewBox: WorldBox | null;
+	dragMode: DragMode;
+}
+
+export function createEditorState(): EditorState {
+	return {
+		enabled: false,
+		activeTool: 'brush-add',
+		selectedVoxelId: DEFAULT_SELECTED_VOXEL_ID,
+		dragStart: null,
+		hoverHit: null,
+		mode: 'add',
+		boxConstraint: 'free',
+		previewBox: null,
+		dragMode: 'single'
+	};
+}
+
+export function isBoxTool(tool: EditorToolType): boolean {
+	return tool.startsWith('box-');
+}
+
+export function getEditorModeForTool(tool: EditorToolType): EditorMode {
+	switch (tool) {
+		case 'brush-remove':
+		case 'box-carve':
+			return 'remove';
+		case 'brush-paint':
+		case 'box-paint':
+			return 'paint';
+		default:
+			return 'add';
+	}
+}
+
+export function getBoxToolMode(tool: EditorToolType): BoxToolMode | null {
+	switch (tool) {
+		case 'box-fill':
+			return 'solid';
+		case 'box-hollow':
+			return 'hollow';
+		case 'box-carve':
+			return 'carve';
+		case 'box-paint':
+			return 'paint';
+		default:
+			return null;
+	}
+}
+
+export function getInteractionBoxToolMode(
+	tool: EditorToolType,
+	dragMode: DragMode
+): BoxToolMode | null {
+	const explicitBoxMode = getBoxToolMode(tool);
+
+	if (explicitBoxMode) {
+		return explicitBoxMode;
+	}
+
+	if (dragMode !== 'region') {
+		return null;
+	}
+
+	switch (tool) {
+		case 'brush-add':
+			return 'solid';
+		case 'brush-remove':
+			return 'carve';
+		case 'brush-paint':
+			return 'paint';
+		default:
+			return null;
+	}
+}
+
+export function setActiveEditorTool(state: EditorState, tool: EditorToolType): void {
+	state.activeTool = tool;
+	state.mode = getEditorModeForTool(tool);
+}
+
+export function getEditorToolLabel(tool: EditorToolType): string {
+	switch (tool) {
+		case 'brush-add':
+			return 'Brush Add';
+		case 'brush-remove':
+			return 'Brush Remove';
+		case 'brush-paint':
+			return 'Brush Paint';
+		case 'box-fill':
+			return 'Box Fill';
+		case 'box-hollow':
+			return 'Box Hollow';
+		case 'box-carve':
+			return 'Box Carve';
+		case 'box-paint':
+			return 'Box Paint';
+	}
+}
+
+export function getBoxConstraintLabel(constraint: BoxConstraint): string {
+	switch (constraint) {
+		case 'horizontal':
+			return 'Horizontal';
+		case 'vertical-x':
+			return 'Wall X';
+		case 'vertical-z':
+			return 'Wall Z';
+		default:
+			return 'Free 3D';
+	}
+}
