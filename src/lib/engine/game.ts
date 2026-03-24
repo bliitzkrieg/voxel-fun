@@ -1,26 +1,54 @@
 import * as THREE from 'three';
 
-import { getEditorToolLabel } from '$lib/editor/editorState';
 import { EditorController } from '$lib/editor/editorController';
 import { createChunkBoundsHelper, disposeDebugObject } from '$lib/debug/debugDraw';
 import { DebugStats } from '$lib/debug/stats';
+import { EmissiveLightManager } from '$lib/engine/emissiveLightManager';
 import { InputState } from '$lib/engine/input';
 import { FixedLoop } from '$lib/engine/loop';
-import { createGameScene } from '$lib/engine/scene';
+import { applySceneTimeOfDay, createGameScene, type SceneBundle } from '$lib/engine/scene';
+import { createVoxelWaterMaterial, type WaterShaderMaterial } from '$lib/engine/waterMaterial';
+import {
+	closeMaterialManager,
+	getMaterialManagerUiState,
+	openMaterialManager
+} from '$lib/ui/materialManagerState';
+import { closePropManager, getPropUiState, openPropManager } from '$lib/ui/propManagerState';
 import { PlayerController } from '$lib/player/playerController';
 import { ChunkMesh } from '$lib/voxel/chunkMesh';
-import { DEFAULT_VOXEL_SIZE } from '$lib/voxel/constants';
+import { DEFAULT_VOXEL_SIZE, VOXEL_WORLD_SIZE } from '$lib/voxel/constants';
 import { buildDenseTestSlice } from '$lib/voxel/denseTestSlice';
 import { buildChunkMesh } from '$lib/voxel/mesher';
-import { VOXEL_WORLD_SIZE } from '$lib/voxel/constants';
+import {
+	createSerializedPropLibraryState,
+	deletePropDefinition,
+	getReferencedPropMaterialIds,
+	hasPropMaterialReference,
+	resetPropLibrary,
+	restoreSerializedPropLibraryState,
+	type SerializedPropLibraryState
+} from '$lib/voxel/propLibrary';
+import {
+	assignMaterialToHotbar,
+	createSerializedVoxelPaletteState,
+	createVoxelMaterial,
+	deleteVoxelMaterial,
+	getVoxelPaletteEntry,
+	pruneUnusedArchivedVoxelMaterials,
+	resetVoxelPaletteToDefaults,
+	restoreSerializedVoxelPaletteState,
+	updateVoxelMaterialLighting,
+	updateVoxelMaterialWater,
+	type SerializedVoxelPaletteState
+} from '$lib/voxel/voxelPalette';
 import {
 	clearSerializedWorldFromStorage,
 	exportSerializedWorldToDisk,
 	importSerializedWorldFromDisk,
 	loadSerializedWorldFromStorage,
-	saveSerializedWorldToStorage
+	saveSerializedWorldToStorage,
+	type SerializedVoxelWorld
 } from '$lib/voxel/worldPersistence';
-import { getVoxelPaletteEntry } from '$lib/voxel/voxelPalette';
 import type { ChunkKey } from '$lib/voxel/voxelTypes';
 import { VoxelWorld } from '$lib/voxel/world';
 
@@ -39,25 +67,36 @@ export class Game {
 	voxelRoot!: THREE.Group;
 
 	chunkMeshes: Map<ChunkKey, ChunkMesh> = new Map();
-	voxelMaterial!: THREE.MeshStandardMaterial;
+	voxelOpaqueMaterial!: THREE.MeshStandardMaterial;
+	voxelTransparentMaterial!: THREE.MeshStandardMaterial;
+	voxelWaterMaterial!: WaterShaderMaterial;
+	voxelGlowMaterial!: THREE.MeshBasicMaterial;
 
 	private readonly container: HTMLElement;
 	private input!: InputState;
 	private loop!: FixedLoop;
 	private resizeObserver!: ResizeObserver;
 	private stats!: DebugStats;
+	private emissiveLightManager!: EmissiveLightManager;
+	private sceneBundle!: SceneBundle;
 	private readonly chunkBounds = new Map<ChunkKey, THREE.Object3D>();
 	private readonly pendingChunkSyncKeys = new Set<ChunkKey>();
+	private readonly waterSunDirection = new THREE.Vector3();
+	private readonly waterSunPosition = new THREE.Vector3();
+	private readonly waterSunTargetPosition = new THREE.Vector3();
 	private lastDirtyChunkCount = 0;
 	private autoSaveHandle: number | null = null;
+	private materialManagerWasOpen = false;
+	private propManagerWasOpen = false;
+	private propPlacementWasActive = false;
 
 	constructor(container: HTMLElement) {
 		this.container = container;
 	}
 
 	init(): void {
-		const { scene } = createGameScene();
-		this.scene = scene;
+		this.sceneBundle = createGameScene();
+		this.scene = this.sceneBundle.scene;
 		this.voxelRoot = new THREE.Group();
 		this.voxelRoot.scale.setScalar(VOXEL_WORLD_SIZE);
 		this.scene.add(this.voxelRoot);
@@ -71,7 +110,8 @@ export class Game {
 		this.renderer.toneMappingExposure = 1.1;
 		this.renderer.shadowMap.enabled = true;
 		this.renderer.shadowMap.type = THREE.VSMShadowMap;
-		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+		this.renderer.shadowMap.autoUpdate = false;
+		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
 		this.renderer.setClearColor('#bfd2d9');
 		this.renderer.domElement.style.display = 'block';
 		this.renderer.domElement.style.width = '100%';
@@ -84,23 +124,45 @@ export class Game {
 
 		this.input = new InputState(this.renderer.domElement);
 		this.world = new VoxelWorld();
-		this.voxelMaterial = new THREE.MeshStandardMaterial({
+		this.voxelOpaqueMaterial = new THREE.MeshStandardMaterial({
 			vertexColors: true,
 			roughness: 0.92,
 			metalness: 0.06
 		});
+		this.voxelTransparentMaterial = new THREE.MeshStandardMaterial({
+			vertexColors: true,
+			roughness: 0.92,
+			metalness: 0.02,
+			transparent: true,
+			depthWrite: false,
+			opacity: 1
+		});
+		this.voxelWaterMaterial = createVoxelWaterMaterial();
+		this.voxelGlowMaterial = new THREE.MeshBasicMaterial({
+			vertexColors: true,
+			transparent: true,
+			opacity: 1,
+			depthWrite: false,
+			blending: THREE.AdditiveBlending,
+			toneMapped: false,
+			fog: false
+		});
+		this.emissiveLightManager = new EmissiveLightManager(this.scene);
 		this.player = new PlayerController(this.world, this.camera, this.input);
 		this.editor = new EditorController(
 			this.world,
 			this.camera,
 			this.input,
 			this.voxelRoot,
+			this.scene,
+			this.renderer.domElement,
 			this.player,
-			(blocks) => this.applyUndoSnapshot(blocks)
+			(snapshot) => this.applyUndoSnapshot(snapshot)
 		);
-
 		this.stats = new DebugStats(this.container);
 
+		closeMaterialManager();
+		closePropManager();
 		this.loadInitialWorld();
 		this.player.teleport(16 * DEFAULT_VOXEL_SIZE, 1 * DEFAULT_VOXEL_SIZE, 11 * DEFAULT_VOXEL_SIZE);
 		this.player.setLookAngles(Math.PI, -0.05);
@@ -133,9 +195,15 @@ export class Game {
 			let chunkMesh = this.chunkMeshes.get(key);
 
 			if (!chunkMesh) {
-				chunkMesh = new ChunkMesh(chunk, this.voxelMaterial);
+				chunkMesh = new ChunkMesh(
+					chunk,
+					this.voxelOpaqueMaterial,
+					this.voxelTransparentMaterial,
+					this.voxelWaterMaterial,
+					this.voxelGlowMaterial
+				);
 				this.chunkMeshes.set(key, chunkMesh);
-				this.voxelRoot.add(chunkMesh.mesh);
+				this.voxelRoot.add(chunkMesh.root);
 
 				if (SHOW_CHUNK_BOUNDS) {
 					const helper = createChunkBoundsHelper(chunk.coord);
@@ -148,24 +216,52 @@ export class Game {
 			this.world.clearDirty(chunk);
 		}
 
+		if (dirtyChunks.length > 0) {
+			this.invalidateShadows();
+		}
+
 		this.pendingChunkSyncKeys.clear();
 	}
 
 	update(dt: number): void {
-		this.player.update(dt);
-		const changedChunkKeys = this.editor.update();
-		this.queueChunkSync(changedChunkKeys);
+		this.handleOverlayHotkeys();
+
+		const materialManagerOpen = getMaterialManagerUiState().open;
+		const propUiState = getPropUiState();
+		const propManagerOpen = propUiState.managerOpen;
+		const propPlacementActive = propUiState.placementActive;
+		let changedChunkKeys = new Set<ChunkKey>();
+
+		if (materialManagerOpen || propManagerOpen) {
+			this.editor.resetTransientState();
+		} else if (propPlacementActive) {
+			this.player.update(dt);
+			changedChunkKeys = this.editor.update();
+			this.queueChunkSync(changedChunkKeys);
+		} else {
+			this.player.update(dt);
+			changedChunkKeys = this.editor.update();
+			this.queueChunkSync(changedChunkKeys);
+		}
+
+		if (changedChunkKeys.size > 0) {
+			this.pruneUnusedArchivedMaterials();
+			this.emissiveLightManager.invalidateCandidates();
+		}
+
 		this.scheduleWorldSave(changedChunkKeys.size > 0);
+
 		this.updateViewportState();
 		this.lastDirtyChunkCount = Math.max(
 			this.pendingChunkSyncKeys.size,
 			this.world.getDirtyChunks().length
 		);
 		this.syncDirtyChunks();
+		this.emissiveLightManager.sync(this.world, this.camera.position);
 
 		const hoveredChunk = this.editor.getHoveredChunkCoord();
 		const selectedMaterial =
-			getVoxelPaletteEntry(this.editor.state.selectedVoxelId)?.name ?? 'Unknown';
+			getVoxelPaletteEntry(this.editor.getSelectedMaterialId())?.name ?? 'No Material';
 
 		this.stats.update({
 			position: this.player.position,
@@ -175,7 +271,7 @@ export class Game {
 			chunkCount: this.world.chunks.size,
 			dirtyChunkCount: this.lastDirtyChunkCount,
 			editorEnabled: this.editor.state.enabled,
-			activeTool: getEditorToolLabel(this.editor.state.activeTool),
+			activeTool: this.editor.getToolLabel(),
 			selectedMaterial,
 			selectedSize: this.editor.state.selectedVoxelSize,
 			mode: this.editor.state.mode,
@@ -185,6 +281,7 @@ export class Game {
 
 	render(): void {
 		this.stats.recordFrame();
+		this.syncWaterMaterialUniforms();
 		this.renderer.render(this.scene, this.camera);
 	}
 
@@ -200,7 +297,11 @@ export class Game {
 		this.clearRenderedWorld();
 		this.scene.remove(this.voxelRoot);
 
-		this.voxelMaterial?.dispose();
+		this.voxelOpaqueMaterial?.dispose();
+		this.voxelTransparentMaterial?.dispose();
+		this.voxelWaterMaterial?.dispose();
+		this.voxelGlowMaterial?.dispose();
+		this.emissiveLightManager?.dispose();
 		this.renderer?.dispose();
 		this.renderer?.domElement.remove();
 	}
@@ -238,13 +339,155 @@ export class Game {
 			return false;
 		}
 
-		const loaded = this.applyWorldBlocks(snapshot.blocks);
+		const loaded = this.applySerializedWorld(snapshot);
 
 		if (loaded) {
 			this.flushWorldSave();
 		}
 
 		return loaded;
+	}
+
+	getSelectedMaterialId(): number {
+		return this.editor.getSelectedMaterialId();
+	}
+
+	selectMaterial(materialId: number): boolean {
+		return this.editor.setSelectedMaterial(materialId);
+	}
+
+	createMaterial(input: {
+		name: string;
+		color: [number, number, number];
+		opacity: number;
+		isWater: boolean;
+		emitsLight: boolean;
+		lightTint: [number, number, number];
+	}): boolean {
+		const material = createVoxelMaterial(input);
+
+		if (!material) {
+			return false;
+		}
+
+		this.editor.setSelectedMaterial(material.id);
+		this.flushWorldSave();
+		return true;
+	}
+
+	updateMaterialLighting(
+		materialId: number,
+		input: {
+			emitsLight: boolean;
+			lightTint: [number, number, number];
+		}
+	): boolean {
+		const material = updateVoxelMaterialLighting(materialId, input);
+
+		if (!material) {
+			return false;
+		}
+
+		this.queueMaterialVisualRefresh(material.id);
+		this.emissiveLightManager.invalidateCandidates();
+		this.flushWorldSave();
+		return true;
+	}
+
+	updateMaterialWater(materialId: number, input: { isWater: boolean }): boolean {
+		const material = updateVoxelMaterialWater(materialId, input);
+
+		if (!material) {
+			return false;
+		}
+
+		this.queueMaterialVisualRefresh(material.id);
+		this.flushWorldSave();
+		return true;
+	}
+
+	deleteMaterial(materialId: number): boolean {
+		const result = deleteVoxelMaterial(
+			materialId,
+			this.world.hasMaterialReference(materialId) || hasPropMaterialReference(materialId)
+		);
+
+		if (!result.deleted) {
+			return false;
+		}
+
+		this.editor.ensureSelectedMaterialValid();
+		this.flushWorldSave();
+		return true;
+	}
+
+	assignMaterialToHotbarSlot(slotIndex: number, materialId: number | null): boolean {
+		const changed = assignMaterialToHotbar(slotIndex, materialId);
+
+		if (!changed) {
+			return false;
+		}
+
+		this.editor.ensureSelectedMaterialValid();
+		this.flushWorldSave();
+		return true;
+	}
+
+	getSelectedPropBlockCount(): number {
+		return this.editor.getSelectedBlockCount();
+	}
+
+	createProp(input: { name: string; interactable: boolean }): boolean {
+		const prop = this.editor.createPropFromSelection(input);
+
+		if (!prop) {
+			return false;
+		}
+
+		this.flushWorldSave();
+		return true;
+	}
+
+	startPropPlacement(propId: number): boolean {
+		const started = this.editor.startPropPlacement(propId);
+
+		if (started) {
+			closeMaterialManager();
+			closePropManager();
+			this.updateViewportState();
+		}
+
+		return started;
+	}
+
+	deleteProp(propId: number): boolean {
+		const affectedChunkKeys = new Set<ChunkKey>();
+
+		if (!deletePropDefinition(propId)) {
+			return false;
+		}
+
+		for (const propInstance of this.world.getPropInstances()) {
+			if (propInstance.propId !== propId) {
+				continue;
+			}
+
+			for (const blockId of this.world.getPropInstanceBlockIds(propInstance.id)) {
+				const block = this.world.blocks.get(blockId);
+
+				if (block) {
+					this.world.collectAffectedChunkKeysForBlock(block.origin, block.size, affectedChunkKeys);
+				}
+			}
+		}
+
+		this.world.removePropInstancesByPropId(propId);
+
+		this.editor.handleDeletedProp(propId);
+		this.queueChunkSync(affectedChunkKeys);
+		this.pruneUnusedArchivedMaterials();
+		this.flushWorldSave();
+		return true;
 	}
 
 	private updateSize(): void {
@@ -256,12 +499,29 @@ export class Game {
 		this.renderer.setSize(width, height, false);
 	}
 
+	private invalidateShadows(): void {
+		this.renderer.shadowMap.needsUpdate = true;
+	}
+
 	private updateViewportState(): void {
 		const crosshair = this.container.parentElement?.querySelector('.crosshair');
+		const materialManagerOpen = getMaterialManagerUiState().open;
+		const propUiState = getPropUiState();
+		const hideReticle =
+			this.editor.state.enabled ||
+			materialManagerOpen ||
+			propUiState.managerOpen ||
+			propUiState.placementActive;
+		const suppressPointerLock =
+			materialManagerOpen || propUiState.managerOpen || propUiState.placementActive;
+		const enablePlacementFreeLook =
+			propUiState.placementActive && !materialManagerOpen && !propUiState.managerOpen;
 
+		this.input.setPointerLockSuppressed(suppressPointerLock);
+		this.input.setFreeLookEnabled(enablePlacementFreeLook && !this.editor.isTransformDragging());
 		this.container.style.cursor = '';
 		this.renderer.domElement.style.cursor = '';
-		crosshair?.classList.toggle('crosshair-hidden', this.editor.state.enabled);
+		crosshair?.classList.toggle('crosshair-hidden', hideReticle);
 	}
 
 	private loadInitialWorld(): void {
@@ -274,9 +534,11 @@ export class Game {
 
 	private loadDefaultWorld(): boolean {
 		clearSerializedWorldFromStorage();
+		resetVoxelPaletteToDefaults();
+		resetPropLibrary();
 		const seedWorld = new VoxelWorld();
 		buildDenseTestSlice(seedWorld);
-		return this.applyWorldBlocks(seedWorld.getBlocks());
+		return this.applyWorldState(seedWorld.getBlocks(), seedWorld.getPropInstances());
 	}
 
 	private restoreWorldFromStorage(): boolean {
@@ -286,7 +548,7 @@ export class Game {
 			return false;
 		}
 
-		const restored = this.applyWorldBlocks(snapshot.blocks);
+		const restored = this.applySerializedWorld(snapshot);
 
 		if (!restored) {
 			clearSerializedWorldFromStorage();
@@ -295,19 +557,60 @@ export class Game {
 		return restored;
 	}
 
-	private applyWorldBlocks(blocks: ReturnType<VoxelWorld['getBlocks']>): boolean {
-		if (!this.world.replaceBlocks(blocks)) {
+	private applySerializedWorld(snapshot: SerializedVoxelWorld): boolean {
+		const previousPaletteState = this.capturePaletteState();
+		const previousPropLibraryState = this.capturePropLibraryState();
+
+		if (
+			!restoreSerializedVoxelPaletteState(this.extractPaletteState(snapshot)) ||
+			!restoreSerializedPropLibraryState(this.extractPropLibraryState(snapshot))
+		) {
 			return false;
 		}
 
-		this.editor.resetTransientState();
-		this.clearRenderedWorld();
-		this.syncDirtyChunks();
+		if (!this.applyWorldState(snapshot.blocks, snapshot.propInstances)) {
+			restoreSerializedVoxelPaletteState(previousPaletteState);
+			restoreSerializedPropLibraryState(previousPropLibraryState);
+			return false;
+		}
+
 		return true;
 	}
 
-	private applyUndoSnapshot(blocks: ReturnType<VoxelWorld['getBlocks']>): boolean {
-		const applied = this.applyWorldBlocks(blocks);
+	private applyWorldState(
+		blocks: ReturnType<VoxelWorld['getBlocks']>,
+		propInstances: ReturnType<VoxelWorld['getPropInstances']>
+	): boolean {
+		this.editor.cancelPlacement();
+
+		if (!this.world.replaceState(blocks, propInstances)) {
+			return false;
+		}
+
+		this.emissiveLightManager.invalidateCandidates();
+		this.editor.ensureSelectedMaterialValid();
+		this.editor.resetTransientState();
+		this.clearRenderedWorld();
+		this.syncDirtyChunks();
+		this.invalidateShadows();
+		return true;
+	}
+
+	private applyUndoSnapshot(snapshot: {
+		blocks: ReturnType<VoxelWorld['getBlocks']>;
+		propInstances: ReturnType<VoxelWorld['getPropInstances']>;
+		palette: SerializedVoxelPaletteState;
+		props: SerializedPropLibraryState;
+	}): boolean {
+		const applied = this.applySerializedWorld({
+			version: 5,
+			savedAt: new Date().toISOString(),
+			blocks: snapshot.blocks,
+			materials: snapshot.palette.materials,
+			hotbar: snapshot.palette.hotbar,
+			props: snapshot.props.props,
+			propInstances: snapshot.propInstances
+		});
 
 		if (applied) {
 			this.flushWorldSave();
@@ -318,7 +621,7 @@ export class Game {
 
 	private clearRenderedWorld(): void {
 		for (const chunkMesh of this.chunkMeshes.values()) {
-			this.voxelRoot.remove(chunkMesh.mesh);
+			this.voxelRoot.remove(chunkMesh.root);
 			chunkMesh.dispose();
 		}
 
@@ -332,6 +635,89 @@ export class Game {
 		this.chunkBounds.clear();
 		this.pendingChunkSyncKeys.clear();
 		this.lastDirtyChunkCount = 0;
+	}
+
+	private handleOverlayHotkeys(): void {
+		const materialManagerOpen = getMaterialManagerUiState().open;
+		const propUiState = getPropUiState();
+		const propManagerOpen = propUiState.managerOpen;
+		const propPlacementActive = propUiState.placementActive;
+		const anyManagerOpen = materialManagerOpen || propManagerOpen;
+		const ignoreToggleHotkey = isTextInputElement(document.activeElement);
+
+		if (!ignoreToggleHotkey && this.input.consumeKeyPress('KeyL')) {
+			this.toggleTimeOfDay();
+		}
+
+		if (
+			!ignoreToggleHotkey &&
+			!anyManagerOpen &&
+			!propPlacementActive &&
+			this.input.consumeKeyPress('KeyM')
+		) {
+			closePropManager();
+			openMaterialManager();
+		}
+
+		if (
+			!ignoreToggleHotkey &&
+			!anyManagerOpen &&
+			!propPlacementActive &&
+			this.input.consumeKeyPress('KeyP')
+		) {
+			closeMaterialManager();
+			openPropManager();
+		}
+
+		if (!propPlacementActive && this.input.consumeKeyPress('Escape')) {
+			if (materialManagerOpen) {
+				closeMaterialManager();
+			}
+
+			if (propManagerOpen) {
+				closePropManager();
+			}
+		}
+
+		const nextMaterialManagerOpen = getMaterialManagerUiState().open;
+		const nextPropUiState = getPropUiState();
+		const nextPropManagerOpen = nextPropUiState.managerOpen;
+		const nextPropPlacementActive = nextPropUiState.placementActive;
+		const anyOverlayJustOpened =
+			(nextMaterialManagerOpen && !this.materialManagerWasOpen) ||
+			(nextPropManagerOpen && !this.propManagerWasOpen) ||
+			(nextPropPlacementActive && !this.propPlacementWasActive);
+		const anyOverlayJustClosed =
+			(!nextMaterialManagerOpen && this.materialManagerWasOpen) ||
+			(!nextPropManagerOpen && this.propManagerWasOpen) ||
+			(!nextPropPlacementActive && this.propPlacementWasActive);
+
+		if (anyOverlayJustOpened) {
+			this.input.exitPointerLock();
+			this.editor.resetTransientState();
+		}
+
+		if (anyOverlayJustClosed) {
+			this.editor.resetTransientState();
+		}
+
+		this.materialManagerWasOpen = nextMaterialManagerOpen;
+		this.propManagerWasOpen = nextPropManagerOpen;
+		this.propPlacementWasActive = nextPropPlacementActive;
+	}
+
+	private pruneUnusedArchivedMaterials(): void {
+		const referencedMaterialIds = this.world.getReferencedMaterialIds();
+
+		for (const materialId of getReferencedPropMaterialIds()) {
+			referencedMaterialIds.add(materialId);
+		}
+
+		if (!pruneUnusedArchivedVoxelMaterials(referencedMaterialIds)) {
+			return;
+		}
+
+		this.editor.ensureSelectedMaterialValid();
 	}
 
 	private scheduleWorldSave(hasWorldChanges: boolean): void {
@@ -373,4 +759,138 @@ export class Game {
 			this.pendingChunkSyncKeys.add(chunkKey);
 		}
 	}
+
+	private queueMaterialVisualRefresh(materialId: number): void {
+		const affectedChunkKeys = new Set<ChunkKey>();
+
+		for (const block of this.world.blocks.values()) {
+			if (block.materialId !== materialId) {
+				continue;
+			}
+
+			this.world.collectAffectedChunkKeysForBlock(block.origin, block.size, affectedChunkKeys);
+		}
+
+		for (const chunkKey of affectedChunkKeys) {
+			const chunk = this.world.getChunkByKey(chunkKey);
+
+			if (chunk) {
+				chunk.dirty = true;
+			}
+		}
+
+		this.queueChunkSync(affectedChunkKeys);
+	}
+
+	private toggleTimeOfDay(): void {
+		const nextTimeOfDay = this.sceneBundle.timeOfDay === 'day' ? 'night' : 'day';
+		applySceneTimeOfDay(this.sceneBundle, nextTimeOfDay);
+		this.invalidateShadows();
+	}
+
+	private syncWaterMaterialUniforms(): void {
+		const sunLight = this.sceneBundle.sunLight;
+
+		this.waterSunPosition.copy(sunLight.position);
+		this.waterSunTargetPosition.copy(sunLight.target.position);
+		this.waterSunDirection.copy(this.waterSunPosition).sub(this.waterSunTargetPosition).normalize();
+
+		this.voxelWaterMaterial.uniforms.uTime.value = performance.now() * 0.001;
+		this.voxelWaterMaterial.uniforms.uVoxelScale.value = VOXEL_WORLD_SIZE;
+		this.voxelWaterMaterial.uniforms.uSunDirection.value.copy(this.waterSunDirection);
+		this.voxelWaterMaterial.uniforms.uSunColor.value.copy(sunLight.color);
+		this.voxelWaterMaterial.uniforms.uSunIntensity.value = sunLight.intensity;
+		this.voxelWaterMaterial.uniforms.uSkyColor.value.copy(this.sceneBundle.hemisphereLight.color);
+		this.voxelWaterMaterial.uniforms.uGroundColor.value.copy(
+			this.sceneBundle.hemisphereLight.groundColor
+		);
+	}
+
+	private capturePaletteState(): SerializedVoxelPaletteState {
+		return restoreSnapshotClone(createSerializedVoxelPaletteState());
+	}
+
+	private capturePropLibraryState(): SerializedPropLibraryState {
+		return clonePropLibraryState(createSerializedPropLibraryState());
+	}
+
+	private extractPaletteState(snapshot: SerializedVoxelWorld | null): SerializedVoxelPaletteState {
+		return {
+			materials: (snapshot?.materials ?? []).map((material) => ({
+				id: material.id,
+				name: material.name,
+				color: [...material.color] as [number, number, number],
+				opacity: material.opacity,
+				isWater: material.isWater ?? false,
+				emitsLight: material.emitsLight ?? false,
+				lightTint: [...(material.lightTint ?? material.color)] as [number, number, number],
+				archived: material.archived
+			})),
+			hotbar: [...(snapshot?.hotbar ?? [])]
+		};
+	}
+
+	private extractPropLibraryState(
+		snapshot: SerializedVoxelWorld | null
+	): SerializedPropLibraryState {
+		return {
+			props: (snapshot?.props ?? []).map((prop) => ({
+				id: prop.id,
+				name: prop.name,
+				interactable: prop.interactable,
+				blocks: prop.blocks.map((block) => ({
+					materialId: block.materialId,
+					origin: { ...block.origin },
+					size: block.size
+				})),
+				bounds: {
+					min: { ...prop.bounds.min },
+					max: { ...prop.bounds.max }
+				}
+			}))
+		};
+	}
+}
+
+function restoreSnapshotClone(state: SerializedVoxelPaletteState): SerializedVoxelPaletteState {
+	return {
+		materials: state.materials.map((material) => ({
+			id: material.id,
+			name: material.name,
+			color: [...material.color] as [number, number, number],
+			opacity: material.opacity,
+			isWater: material.isWater ?? false,
+			emitsLight: material.emitsLight ?? false,
+			lightTint: [...(material.lightTint ?? material.color)] as [number, number, number],
+			archived: material.archived
+		})),
+		hotbar: [...state.hotbar]
+	};
+}
+
+function clonePropLibraryState(state: SerializedPropLibraryState): SerializedPropLibraryState {
+	return {
+		props: state.props.map((prop) => ({
+			id: prop.id,
+			name: prop.name,
+			interactable: prop.interactable,
+			blocks: prop.blocks.map((block) => ({
+				materialId: block.materialId,
+				origin: { ...block.origin },
+				size: block.size
+			})),
+			bounds: {
+				min: { ...prop.bounds.min },
+				max: { ...prop.bounds.max }
+			}
+		}))
+	};
+}
+
+function isTextInputElement(element: Element | null): boolean {
+	return (
+		element instanceof HTMLInputElement ||
+		element instanceof HTMLTextAreaElement ||
+		element instanceof HTMLSelectElement
+	);
 }

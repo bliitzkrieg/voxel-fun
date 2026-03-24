@@ -1,17 +1,32 @@
 import { CHUNK_SIZE, VOXEL_AIR } from '$lib/voxel/constants';
-import { getVoxelColor } from '$lib/voxel/voxelPalette';
+import {
+	doesVoxelEmitLight,
+	getVoxelColor,
+	getVoxelLightTint,
+	getVoxelOpacity,
+	isWaterVoxelMaterial
+} from '$lib/voxel/voxelPalette';
 import type { VoxelChunk } from '$lib/voxel/chunk';
 import type { VoxelWorld } from '$lib/voxel/world';
 
-export interface MeshBuffers {
+export interface MeshSurfaceBuffers {
 	positions: number[];
 	normals: number[];
 	colors: number[];
 	indices: number[];
+	colorSize: 3 | 4;
 }
 
+export interface MeshBuffers {
+	opaque: MeshSurfaceBuffers;
+	transparent: MeshSurfaceBuffers;
+	water: MeshSurfaceBuffers;
+	glow: MeshSurfaceBuffers;
+}
+
+const EMISSIVE_GLOW_ALPHA = 0.6;
+
 interface FaceDef {
-	name: 'px' | 'nx' | 'py' | 'ny' | 'pz' | 'nz';
 	neighbor: [number, number, number];
 	normal: [number, number, number];
 	vertices: [
@@ -24,7 +39,6 @@ interface FaceDef {
 
 const FACE_DEFS: FaceDef[] = [
 	{
-		name: 'px',
 		neighbor: [1, 0, 0],
 		normal: [1, 0, 0],
 		vertices: [
@@ -35,7 +49,6 @@ const FACE_DEFS: FaceDef[] = [
 		]
 	},
 	{
-		name: 'nx',
 		neighbor: [-1, 0, 0],
 		normal: [-1, 0, 0],
 		vertices: [
@@ -46,7 +59,6 @@ const FACE_DEFS: FaceDef[] = [
 		]
 	},
 	{
-		name: 'py',
 		neighbor: [0, 1, 0],
 		normal: [0, 1, 0],
 		vertices: [
@@ -57,7 +69,6 @@ const FACE_DEFS: FaceDef[] = [
 		]
 	},
 	{
-		name: 'ny',
 		neighbor: [0, -1, 0],
 		normal: [0, -1, 0],
 		vertices: [
@@ -68,7 +79,6 @@ const FACE_DEFS: FaceDef[] = [
 		]
 	},
 	{
-		name: 'pz',
 		neighbor: [0, 0, 1],
 		normal: [0, 0, 1],
 		vertices: [
@@ -79,7 +89,6 @@ const FACE_DEFS: FaceDef[] = [
 		]
 	},
 	{
-		name: 'nz',
 		neighbor: [0, 0, -1],
 		normal: [0, 0, -1],
 		vertices: [
@@ -93,10 +102,10 @@ const FACE_DEFS: FaceDef[] = [
 
 export function buildChunkMesh(world: VoxelWorld, chunk: VoxelChunk): MeshBuffers {
 	const buffers: MeshBuffers = {
-		positions: [],
-		normals: [],
-		colors: [],
-		indices: []
+		opaque: createMeshSurfaceBuffers(3),
+		transparent: createMeshSurfaceBuffers(4),
+		water: createMeshSurfaceBuffers(4),
+		glow: createMeshSurfaceBuffers(4)
 	};
 
 	const chunkWorldX = chunk.coord.x * CHUNK_SIZE;
@@ -118,6 +127,15 @@ export function buildChunkMesh(world: VoxelWorld, chunk: VoxelChunk): MeshBuffer
 				const wy = chunkWorldY + ly;
 				const wz = chunkWorldZ + lz;
 				const color = getVoxelColor(voxelId);
+				const opacity = getVoxelOpacity(voxelId);
+				const isWater = isWaterVoxelMaterial(voxelId);
+				const emitsLight = doesVoxelEmitLight(voxelId);
+				const lightTint = emitsLight ? getVoxelLightTint(voxelId) : null;
+				const targetBuffers = isWater
+					? buffers.water
+					: opacity < 1
+						? buffers.transparent
+						: buffers.opaque;
 
 				for (const face of FACE_DEFS) {
 					const neighborId = world.getVoxel(
@@ -126,19 +144,35 @@ export function buildChunkMesh(world: VoxelWorld, chunk: VoxelChunk): MeshBuffer
 						wz + face.neighbor[2]
 					);
 
-					if (neighborId !== VOXEL_AIR) {
+					if (!shouldRenderFace(voxelId, opacity, isWater, neighborId)) {
 						continue;
 					}
 
-					const baseIndex = buffers.positions.length / 3;
+					const baseIndex = targetBuffers.positions.length / 3;
 
 					for (const vertex of face.vertices) {
-						buffers.positions.push(lx + vertex[0], ly + vertex[1], lz + vertex[2]);
-						buffers.normals.push(face.normal[0], face.normal[1], face.normal[2]);
-						buffers.colors.push(color[0], color[1], color[2]);
+						targetBuffers.positions.push(lx + vertex[0], ly + vertex[1], lz + vertex[2]);
+						targetBuffers.normals.push(face.normal[0], face.normal[1], face.normal[2]);
+
+						if (targetBuffers.colorSize === 4) {
+							targetBuffers.colors.push(color[0], color[1], color[2], opacity);
+						} else {
+							targetBuffers.colors.push(color[0], color[1], color[2]);
+						}
+
+						if (emitsLight && lightTint) {
+							buffers.glow.positions.push(lx + vertex[0], ly + vertex[1], lz + vertex[2]);
+							buffers.glow.normals.push(face.normal[0], face.normal[1], face.normal[2]);
+							buffers.glow.colors.push(
+								lightTint[0],
+								lightTint[1],
+								lightTint[2],
+								EMISSIVE_GLOW_ALPHA
+							);
+						}
 					}
 
-					buffers.indices.push(
+					targetBuffers.indices.push(
 						baseIndex,
 						baseIndex + 1,
 						baseIndex + 2,
@@ -146,10 +180,55 @@ export function buildChunkMesh(world: VoxelWorld, chunk: VoxelChunk): MeshBuffer
 						baseIndex + 2,
 						baseIndex + 3
 					);
+
+					if (emitsLight) {
+						const glowBaseIndex = buffers.glow.positions.length / 3 - 4;
+						buffers.glow.indices.push(
+							glowBaseIndex,
+							glowBaseIndex + 1,
+							glowBaseIndex + 2,
+							glowBaseIndex,
+							glowBaseIndex + 2,
+							glowBaseIndex + 3
+						);
+					}
 				}
 			}
 		}
 	}
 
 	return buffers;
+}
+
+function createMeshSurfaceBuffers(colorSize: 3 | 4): MeshSurfaceBuffers {
+	return {
+		positions: [],
+		normals: [],
+		colors: [],
+		indices: [],
+		colorSize
+	};
+}
+
+function shouldRenderFace(
+	voxelId: number,
+	opacity: number,
+	isWater: boolean,
+	neighborId: number
+): boolean {
+	if (neighborId === VOXEL_AIR) {
+		return true;
+	}
+
+	const currentIsTranslucent = isWater || opacity < 1;
+
+	if (currentIsTranslucent) {
+		return false;
+	}
+
+	return isTranslucentVoxel(neighborId) && neighborId !== voxelId;
+}
+
+function isTranslucentVoxel(voxelId: number): boolean {
+	return voxelId !== VOXEL_AIR && (isWaterVoxelMaterial(voxelId) || getVoxelOpacity(voxelId) < 1);
 }

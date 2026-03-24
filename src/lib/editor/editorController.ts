@@ -1,8 +1,10 @@
 import * as THREE from 'three';
+import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 
 import {
 	createEditorState,
 	getEditorModeForTool,
+	getEditorToolLabel,
 	getInteractionBoxToolMode,
 	isBoxTool,
 	setActiveEditorTool,
@@ -14,19 +16,84 @@ import type { EditorTool, EditorToolContext } from '$lib/editor/editorTool';
 import { createPreviewBox, getToolTargetCoord } from '$lib/editor/editorTargets';
 import { InputState } from '$lib/engine/input';
 import { PlayerController } from '$lib/player/playerController';
-import { DEFAULT_VOXEL_SIZE, VOXEL_SIZE_PRESETS, VOXEL_WORLD_SIZE } from '$lib/voxel/constants';
-import { getVoxelPaletteEntry } from '$lib/voxel/voxelPalette';
-import type { ChunkCoord, ChunkKey, WorldBox, WorldCoord } from '$lib/voxel/voxelTypes';
+import {
+	clearPropPlacement,
+	openPropManager,
+	setPropPlacementTransformMode,
+	startPropPlacement
+} from '$lib/ui/propManagerState';
+import {
+	DEFAULT_VOXEL_SIZE,
+	VOXEL_AIR,
+	VOXEL_SIZE_PRESETS,
+	VOXEL_WORLD_SIZE
+} from '$lib/voxel/constants';
+import {
+	createPropDefinition,
+	createSerializedPropLibraryState,
+	getPropDefinition,
+	type SerializedPropLibraryState
+} from '$lib/voxel/propLibrary';
+import {
+	capturePropDefinitionBlocks,
+	normalizeQuarterTurns,
+	resolvePropDefinitionBlocks
+} from '$lib/voxel/propTransforms';
+import {
+	createSerializedVoxelPaletteState,
+	getFirstSelectableHotbarMaterialId,
+	getFirstSelectableVoxelMaterialId,
+	getHotbarMaterialId,
+	isSelectableVoxelMaterial,
+	type SerializedVoxelPaletteState
+} from '$lib/voxel/voxelPalette';
 import { raycastVoxel } from '$lib/voxel/voxelRaycast';
-import type { VoxelCommandResult } from '$lib/voxel/voxelCommands';
-import type { VoxelWorld } from '$lib/voxel/world';
+import { createVoxelCommandResult, type VoxelCommandResult } from '$lib/voxel/voxelCommands';
+import type {
+	ChunkCoord,
+	ChunkKey,
+	PropDefinition,
+	PropDefinitionBlock,
+	PropId,
+	PropInstanceRotation,
+	VoxelBlock,
+	VoxelBlockId,
+	WorldBox,
+	WorldCoord
+} from '$lib/voxel/voxelTypes';
+import type {
+	SerializedWorldBlock,
+	SerializedWorldPropInstance,
+	VoxelWorld
+} from '$lib/voxel/world';
 
 const MAX_EDIT_DISTANCE = 14 * DEFAULT_VOXEL_SIZE;
 const MAX_UNDO_ENTRIES = 64;
 const ADD_COLOR = new THREE.Color('#44d17a');
 const REMOVE_COLOR = new THREE.Color('#ff6b57');
 const PAINT_COLOR = new THREE.Color('#4dc9ff');
+const SELECT_COLOR = new THREE.Color('#ffd84a');
+const PROP_VALID_COLOR = new THREE.Color('#5ef0ff');
+const PROP_INVALID_COLOR = new THREE.Color('#ff6b57');
+
 type WorldSnapshot = ReturnType<VoxelWorld['getBlocks']>;
+type PropInstanceSnapshot = ReturnType<VoxelWorld['getPropInstances']>;
+type SelectionOperation = 'replace' | 'add' | 'subtract';
+
+interface ProjectSnapshot {
+	blocks: WorldSnapshot;
+	propInstances: PropInstanceSnapshot;
+	palette: SerializedVoxelPaletteState;
+	props: SerializedPropLibraryState;
+}
+
+interface ActivePropPlacement {
+	prop: PropDefinition;
+	origin: WorldCoord;
+	rotationQuarterTurns: PropInstanceRotation;
+	resolvedBlocks: PropDefinitionBlock[];
+	valid: boolean;
+}
 
 export class EditorController {
 	readonly state: EditorState = createEditorState();
@@ -37,10 +104,54 @@ export class EditorController {
 	private readonly interactionCameraPosition = new THREE.Vector3();
 	private readonly interactionRayDirection = new THREE.Vector3();
 	private readonly pendingChunkKeys = new Set<ChunkKey>();
+	private readonly selectedBlockIds = new Set<VoxelBlockId>();
+	private readonly selectionRoot = new THREE.Group();
+	private readonly selectionFillMaterial = new THREE.MeshBasicMaterial({
+		color: SELECT_COLOR,
+		transparent: true,
+		opacity: 0.1,
+		depthWrite: false,
+		depthTest: false
+	});
+	private readonly selectionWireMaterial = new THREE.LineBasicMaterial({
+		color: SELECT_COLOR,
+		transparent: true,
+		opacity: 0.92,
+		depthTest: false
+	});
+	private readonly selectionBoxGeometry = new THREE.BoxGeometry(1, 1, 1);
+	private readonly selectionEdgesGeometry = new THREE.EdgesGeometry(this.selectionBoxGeometry);
+	private readonly propPlacementRoot = new THREE.Group();
+	private readonly propPlacementFillMaterial = new THREE.MeshBasicMaterial({
+		color: PROP_VALID_COLOR,
+		transparent: true,
+		opacity: 0.18,
+		depthWrite: false,
+		depthTest: false
+	});
+	private readonly propPlacementWireMaterial = new THREE.LineBasicMaterial({
+		color: PROP_VALID_COLOR,
+		transparent: true,
+		opacity: 0.96,
+		depthTest: false
+	});
+	private readonly propPlacementBoxGeometry = new THREE.BoxGeometry(1, 1, 1);
+	private readonly propPlacementEdgesGeometry = new THREE.EdgesGeometry(
+		this.propPlacementBoxGeometry
+	);
+	private readonly transformControls: TransformControls;
+	private readonly transformControlsHelper: THREE.Object3D;
+
 	private activeInteractionTool: EditorTool | null = null;
-	private readonly undoStack: WorldSnapshot[] = [];
-	private pendingUndoSnapshot: WorldSnapshot | null = null;
+	private readonly undoStack: ProjectSnapshot[] = [];
+	private pendingUndoSnapshot: ProjectSnapshot | null = null;
 	private hasCommittedPendingUndo = false;
+	private selectionDragStartCell: WorldCoord | null = null;
+	private selectionClickBlockId: VoxelBlockId | null = null;
+	private selectionOperation: SelectionOperation = 'replace';
+	private selectionConnectedAppend = false;
+	private selectionWasDragged = false;
+	private activePropPlacement: ActivePropPlacement | null = null;
 
 	private readonly targetHighlight: THREE.LineSegments;
 	private readonly boxPreviewWireframe: THREE.LineSegments;
@@ -50,22 +161,59 @@ export class EditorController {
 		private readonly world: VoxelWorld,
 		private readonly camera: THREE.PerspectiveCamera,
 		private readonly input: InputState,
-		private readonly scene: THREE.Object3D,
+		private readonly voxelScene: THREE.Object3D,
+		private readonly worldScene: THREE.Object3D,
+		private readonly domElement: HTMLElement,
 		private readonly player: PlayerController,
-		private readonly applyWorldSnapshot: (blocks: WorldSnapshot) => boolean
+		private readonly applyWorldSnapshot: (snapshot: ProjectSnapshot) => boolean
 	) {
 		this.targetHighlight = createWireCube(ADD_COLOR, 0.9);
 		this.boxPreviewWireframe = createWireCube(ADD_COLOR, 0.95);
 		this.boxPreviewGhost = createGhostCube(ADD_COLOR, 0.14);
 
-		this.scene.add(this.targetHighlight, this.boxPreviewWireframe, this.boxPreviewGhost);
+		this.selectionRoot.visible = false;
+		this.selectionRoot.renderOrder = 18;
+		this.propPlacementRoot.visible = false;
+		this.propPlacementRoot.rotation.order = 'XYZ';
+		this.propPlacementRoot.renderOrder = 21;
+
+		this.voxelScene.add(
+			this.targetHighlight,
+			this.boxPreviewWireframe,
+			this.boxPreviewGhost,
+			this.selectionRoot
+		);
+		this.worldScene.add(this.propPlacementRoot);
+
+		this.transformControls = new TransformControls(this.camera, this.domElement);
+		this.transformControls.enabled = false;
+		this.transformControls.setSpace('world');
+		this.transformControls.setMode('translate');
+		this.transformControls.setTranslationSnap(VOXEL_WORLD_SIZE);
+		this.transformControls.setRotationSnap(Math.PI * 0.5);
+		this.transformControls.addEventListener('objectChange', this.handleTransformObjectChange);
+		this.transformControlsHelper = this.transformControls.getHelper();
+		this.transformControlsHelper.visible = false;
+		this.worldScene.add(this.transformControlsHelper);
 	}
 
 	update(): Set<ChunkKey> {
+		this.ensureSelectedMaterialValid();
+		this.pruneSelection();
 		this.handleModeToggle();
+
+		if (this.activePropPlacement) {
+			this.handlePropPlacementInput();
+			this.state.hoverHit = null;
+			this.state.previewBox = null;
+			this.updatePreviewState();
+			return this.consumePendingChunkKeys();
+		}
 
 		if (!this.state.enabled) {
 			this.clearInteraction();
+			this.clearSelectionDrag();
+			this.state.selectionEnabled = false;
 			this.state.hoverHit = null;
 			this.state.previewBox = null;
 			this.updatePreviewState();
@@ -74,14 +222,24 @@ export class EditorController {
 
 		this.handleHotkeys();
 		this.updateHoverHit();
+
+		if (this.state.selectionEnabled) {
+			this.handleSelectionInput();
+			this.updatePreviewState();
+			return this.consumePendingChunkKeys();
+		}
+
 		this.handleSampleInput();
 		this.handleToolInput();
 		this.updatePreviewState();
-
 		return this.consumePendingChunkKeys();
 	}
 
 	getPlacementTarget(): WorldCoord | null {
+		if (this.state.selectionEnabled || this.activePropPlacement) {
+			return null;
+		}
+
 		return getToolTargetCoord(
 			this.state.activeTool,
 			this.state.hoverHit,
@@ -90,6 +248,14 @@ export class EditorController {
 	}
 
 	getHoveredChunkCoord(): ChunkCoord | null {
+		if (this.activePropPlacement) {
+			return this.world.getChunkCoordFromWorld(
+				this.activePropPlacement.origin.x,
+				this.activePropPlacement.origin.y,
+				this.activePropPlacement.origin.z
+			);
+		}
+
 		const coord = this.getPlacementTarget() ?? this.state.hoverHit?.voxel ?? null;
 
 		if (!coord) {
@@ -99,27 +265,175 @@ export class EditorController {
 		return this.world.getChunkCoordFromWorld(coord.x, coord.y, coord.z);
 	}
 
+	getSelectedMaterialId(): number {
+		return this.state.selectedVoxelId;
+	}
+
+	getToolLabel(): string {
+		if (this.activePropPlacement) {
+			return 'Prop Placement';
+		}
+
+		if (this.state.selectionEnabled) {
+			return 'Selection';
+		}
+
+		return getEditorToolLabel(this.state.activeTool);
+	}
+
+	getSelectedBlockCount(): number {
+		this.pruneSelection();
+		return this.selectedBlockIds.size;
+	}
+
+	isPropPlacementActive(): boolean {
+		return this.activePropPlacement !== null;
+	}
+
+	isTransformDragging(): boolean {
+		return this.transformControls.dragging;
+	}
+
+	setSelectedMaterial(materialId: number): boolean {
+		if (!isSelectableVoxelMaterial(materialId)) {
+			return false;
+		}
+
+		if (this.state.selectedVoxelId === materialId) {
+			return false;
+		}
+
+		this.state.selectedVoxelId = materialId;
+		return true;
+	}
+
+	ensureSelectedMaterialValid(): boolean {
+		if (isSelectableVoxelMaterial(this.state.selectedVoxelId)) {
+			return false;
+		}
+
+		const fallbackMaterialId =
+			getFirstSelectableHotbarMaterialId() ?? getFirstSelectableVoxelMaterialId() ?? 0;
+
+		if (this.state.selectedVoxelId === fallbackMaterialId) {
+			return false;
+		}
+
+		this.state.selectedVoxelId = fallbackMaterialId;
+		return true;
+	}
+
+	createPropFromSelection(input: { name: string; interactable: boolean }): PropDefinition | null {
+		this.pruneSelection();
+		const selectedBlocks = [...this.selectedBlockIds]
+			.map((blockId) => this.world.blocks.get(blockId))
+			.filter((block): block is VoxelBlock => !!block);
+
+		if (selectedBlocks.length === 0) {
+			return null;
+		}
+
+		return createPropDefinition({
+			name: input.name,
+			interactable: input.interactable,
+			blocks: capturePropDefinitionBlocks(selectedBlocks)
+		});
+	}
+
+	startPropPlacement(propId: PropId): boolean {
+		const prop = getPropDefinition(propId);
+
+		if (!prop) {
+			return false;
+		}
+
+		this.cancelPropPlacement();
+		this.state.enabled = true;
+		this.state.selectionEnabled = false;
+		this.clearInteraction();
+		this.clearSelectionDrag();
+
+		this.activePropPlacement = {
+			prop,
+			origin: this.getSuggestedPropPlacementOrigin(prop),
+			rotationQuarterTurns: { x: 0, y: 0, z: 0 },
+			resolvedBlocks: [],
+			valid: false
+		};
+
+		this.rebuildPropPlacementPreview(prop);
+		this.propPlacementRoot.position.copy(worldCoordToWorldVector(this.activePropPlacement.origin));
+		this.propPlacementRoot.rotation.set(0, 0, 0);
+		this.propPlacementRoot.visible = true;
+		this.transformControls.attach(this.propPlacementRoot);
+		this.transformControls.enabled = true;
+		this.transformControlsHelper.visible = true;
+		this.transformControls.setMode('translate');
+		startPropPlacement(prop.id, prop.name);
+		setPropPlacementTransformMode('translate');
+		this.syncPropPlacementFromRoot();
+		this.updatePreviewState();
+		return true;
+	}
+
+	cancelPlacement(): void {
+		this.cancelPropPlacement();
+	}
+
+	handleDeletedProp(propId: PropId): void {
+		if (this.activePropPlacement?.prop.id === propId) {
+			this.cancelPropPlacement();
+		}
+	}
+
 	dispose(): void {
-		this.scene.remove(this.targetHighlight, this.boxPreviewWireframe, this.boxPreviewGhost);
+		this.cancelPropPlacement();
+		this.voxelScene.remove(
+			this.targetHighlight,
+			this.boxPreviewWireframe,
+			this.boxPreviewGhost,
+			this.selectionRoot
+		);
+		this.worldScene.remove(this.propPlacementRoot, this.transformControlsHelper);
 		disposePreviewObject(this.targetHighlight);
 		disposePreviewObject(this.boxPreviewWireframe);
 		disposePreviewObject(this.boxPreviewGhost);
+		clearGroupChildren(this.selectionRoot);
+		clearGroupChildren(this.propPlacementRoot);
+		this.selectionEdgesGeometry.dispose();
+		this.selectionBoxGeometry.dispose();
+		this.selectionWireMaterial.dispose();
+		this.selectionFillMaterial.dispose();
+		this.propPlacementEdgesGeometry.dispose();
+		this.propPlacementBoxGeometry.dispose();
+		this.propPlacementWireMaterial.dispose();
+		this.propPlacementFillMaterial.dispose();
+		this.transformControls.dispose();
 	}
 
 	resetTransientState(): void {
 		this.clearInteraction();
+		this.clearSelectionDrag();
 		this.state.hoverHit = null;
+		this.state.previewBox = null;
 		this.updatePreviewState();
 	}
 
 	private handleModeToggle(): void {
-		if (this.input.consumeKeyPress('Tab') || this.input.consumeKeyPress('F1')) {
-			this.state.enabled = !this.state.enabled;
-
-			if (!this.state.enabled) {
-				this.clearInteraction();
-			}
+		if (!this.input.consumeKeyPress('Tab') && !this.input.consumeKeyPress('F1')) {
+			return;
 		}
+
+		this.state.enabled = !this.state.enabled;
+
+		if (this.state.enabled) {
+			return;
+		}
+
+		this.clearInteraction();
+		this.clearSelectionDrag();
+		this.state.selectionEnabled = false;
+		this.cancelPropPlacement();
 	}
 
 	private handleHotkeys(): void {
@@ -128,33 +442,48 @@ export class EditorController {
 			return;
 		}
 
+		if (this.input.consumeKeyPress('Escape') && this.selectedBlockIds.size > 0) {
+			this.clearSelection();
+			this.clearSelectionDrag();
+			return;
+		}
+
+		if (this.input.consumeKeyPress('KeyX')) {
+			this.state.selectionEnabled = !this.state.selectionEnabled;
+			this.clearInteraction();
+			this.clearSelectionDrag();
+			return;
+		}
+
 		if (this.input.isButtonDown(0)) {
 			return;
 		}
 
-		if (this.input.consumeKeyPress('KeyQ')) {
-			setActiveEditorTool(this.state, 'brush-add');
-		}
+		if (!this.state.selectionEnabled) {
+			if (this.input.consumeKeyPress('KeyQ')) {
+				setActiveEditorTool(this.state, 'brush-add');
+			}
 
-		if (this.input.consumeKeyPress('KeyE')) {
-			setActiveEditorTool(this.state, 'brush-remove');
-		}
+			if (this.input.consumeKeyPress('KeyE')) {
+				setActiveEditorTool(this.state, 'brush-remove');
+			}
 
-		if (this.input.consumeKeyPress('KeyR')) {
-			const paintTool = this.input.isShiftDown() ? 'box-paint' : 'brush-paint';
-			setActiveEditorTool(this.state, paintTool);
-		}
+			if (this.input.consumeKeyPress('KeyR')) {
+				const paintTool = this.input.isShiftDown() ? 'box-paint' : 'brush-paint';
+				setActiveEditorTool(this.state, paintTool);
+			}
 
-		if (this.input.consumeKeyPress('KeyB')) {
-			setActiveEditorTool(this.state, 'box-fill');
-		}
+			if (this.input.consumeKeyPress('KeyB')) {
+				setActiveEditorTool(this.state, 'box-fill');
+			}
 
-		if (this.input.consumeKeyPress('KeyH')) {
-			setActiveEditorTool(this.state, 'box-hollow');
-		}
+			if (this.input.consumeKeyPress('KeyH')) {
+				setActiveEditorTool(this.state, 'box-hollow');
+			}
 
-		if (this.input.consumeKeyPress('KeyC')) {
-			setActiveEditorTool(this.state, 'box-carve');
+			if (this.input.consumeKeyPress('KeyC')) {
+				setActiveEditorTool(this.state, 'box-carve');
+			}
 		}
 
 		this.handleMaterialHotkeys();
@@ -187,6 +516,10 @@ export class EditorController {
 			return;
 		}
 
+		if (!isSelectableVoxelMaterial(this.state.hoverHit.block.materialId)) {
+			return;
+		}
+
 		this.state.selectedVoxelId = this.state.hoverHit.block.materialId;
 		this.state.selectedVoxelSize = this.state.hoverHit.block.size;
 	}
@@ -196,10 +529,8 @@ export class EditorController {
 			this.clearInteraction();
 			this.captureUndoSnapshot();
 			this.state.dragMode = this.shouldUseRegionDrag() ? 'region' : 'single';
-			const tool = this.resolveActiveTool();
-			const context = this.createToolContext();
-			this.activeInteractionTool = tool;
-			this.activeInteractionTool.begin(context, this.state.hoverHit);
+			this.activeInteractionTool = this.resolveActiveTool();
+			this.activeInteractionTool.begin(this.createToolContext(), this.state.hoverHit);
 			this.captureInteractionPose();
 		}
 
@@ -209,8 +540,7 @@ export class EditorController {
 
 		if (!this.input.isButtonDown(0)) {
 			if (this.input.consumeButtonRelease(0)) {
-				const context = this.createToolContext();
-				this.activeInteractionTool.end(context);
+				this.activeInteractionTool.end(this.createToolContext());
 			}
 
 			this.clearInteraction();
@@ -221,18 +551,125 @@ export class EditorController {
 			return;
 		}
 
-		const context = this.createToolContext();
-		this.activeInteractionTool.update(context, this.state.hoverHit);
+		this.activeInteractionTool.update(this.createToolContext(), this.state.hoverHit);
 		this.captureInteractionPose();
 	}
 
-	private updatePreviewState(): void {
-		const placementBox = this.state.enabled ? this.getPlacementTargetBox() : null;
-		const showBoxPreview = this.state.enabled && !!this.state.previewBox;
+	private handleSelectionInput(): void {
+		if (this.input.consumeKeyPress('Escape')) {
+			this.clearSelection();
+			this.clearSelectionDrag();
+			return;
+		}
 
-		this.targetHighlight.visible = this.state.enabled && placementBox !== null;
+		if (this.input.consumeButtonPress(0)) {
+			this.clearSelectionDrag();
+			this.selectionClickBlockId = this.state.hoverHit?.block.id ?? null;
+			this.selectionConnectedAppend =
+				this.isConnectedSelectionModifierDown() && this.selectionClickBlockId !== null;
+
+			if (this.selectionConnectedAppend) {
+				this.selectionOperation = 'add';
+				this.selectionDragStartCell = null;
+				this.selectionWasDragged = false;
+				this.state.previewBox = null;
+				return;
+			}
+
+			this.selectionOperation = this.resolveSelectionOperation();
+			this.selectionDragStartCell = this.state.hoverHit ? { ...this.state.hoverHit.voxel } : null;
+			this.selectionWasDragged = false;
+			this.state.previewBox = this.selectionDragStartCell
+				? createPreviewBox(this.selectionDragStartCell, this.selectionDragStartCell)
+				: null;
+			this.captureInteractionPose();
+		}
+
+		if (!this.selectionDragStartCell) {
+			if (this.input.consumeButtonRelease(0)) {
+				if (this.selectionConnectedAppend) {
+					this.appendConnectedSelection(this.selectionClickBlockId);
+				} else {
+					this.applySelectionClick(this.selectionClickBlockId);
+				}
+
+				this.clearSelectionDrag();
+			}
+			return;
+		}
+
+		if (this.input.isButtonDown(0) && this.state.hoverHit) {
+			this.state.previewBox = createPreviewBox(
+				this.selectionDragStartCell,
+				this.state.hoverHit.voxel
+			);
+			this.selectionWasDragged =
+				this.selectionWasDragged ||
+				!areWorldCoordsEqual(this.selectionDragStartCell, this.state.hoverHit.voxel);
+			this.captureInteractionPose();
+		}
+
+		if (!this.input.isButtonDown(0) && this.input.consumeButtonRelease(0)) {
+			if (this.selectionWasDragged && this.state.previewBox) {
+				this.applySelectionBox(this.state.previewBox, this.selectionOperation);
+			} else {
+				this.applySelectionClick(this.selectionClickBlockId);
+			}
+
+			this.clearSelectionDrag();
+		}
+	}
+
+	private handlePropPlacementInput(): void {
+		if (!this.activePropPlacement) {
+			return;
+		}
+
+		if (this.input.consumeKeyPress('KeyW')) {
+			this.transformControls.setMode('translate');
+			setPropPlacementTransformMode('translate');
+		}
+
+		if (this.input.consumeKeyPress('KeyE')) {
+			this.transformControls.setMode('rotate');
+			setPropPlacementTransformMode('rotate');
+		}
+
+		if (this.input.consumeKeyPress('Escape')) {
+			this.cancelPropPlacement();
+			return;
+		}
+
+		if (this.input.consumeKeyPress('KeyP')) {
+			this.cancelPropPlacement(true);
+			return;
+		}
+
+		if (this.input.consumeKeyPress('Enter') || this.input.consumeKeyPress('NumpadEnter')) {
+			this.confirmPropPlacement();
+		}
+	}
+
+	private updatePreviewState(): void {
+		const placementBox =
+			this.state.enabled && !this.state.selectionEnabled ? this.getPlacementTargetBox() : null;
+		const showBoxPreview =
+			this.state.enabled &&
+			!this.activePropPlacement &&
+			!!this.state.previewBox &&
+			(!this.state.selectionEnabled || this.selectionWasDragged);
+
+		this.targetHighlight.visible =
+			this.state.enabled &&
+			!this.state.selectionEnabled &&
+			!this.activePropPlacement &&
+			placementBox !== null;
 		this.boxPreviewWireframe.visible = showBoxPreview;
 		this.boxPreviewGhost.visible = showBoxPreview;
+		this.selectionRoot.visible = this.selectedBlockIds.size > 0 && !this.activePropPlacement;
+		this.propPlacementRoot.visible = this.activePropPlacement !== null;
+		this.transformControlsHelper.visible = this.activePropPlacement !== null;
+		this.transformControls.enabled = this.activePropPlacement !== null;
 
 		if (placementBox) {
 			positionBoxPreview(this.targetHighlight, placementBox, 1.01);
@@ -242,8 +679,10 @@ export class EditorController {
 		if (showBoxPreview && this.state.previewBox) {
 			positionBoxPreview(this.boxPreviewWireframe, this.state.previewBox, 1.01);
 			positionBoxPreview(this.boxPreviewGhost, this.state.previewBox, 1);
-			setPreviewColor(this.boxPreviewWireframe, this.getModeColor());
-			setPreviewColor(this.boxPreviewGhost, this.getModeColor());
+
+			const previewColor = this.state.selectionEnabled ? SELECT_COLOR : this.getModeColor();
+			setPreviewColor(this.boxPreviewWireframe, previewColor);
+			setPreviewColor(this.boxPreviewGhost, previewColor);
 		}
 	}
 
@@ -277,20 +716,394 @@ export class EditorController {
 	}
 
 	private handleMaterialHotkeys(): void {
-		for (let materialId = 1; materialId <= 9; materialId += 1) {
-			if (
-				!this.input.consumeKeyPress(`Digit${materialId}`) &&
-				!this.input.consumeKeyPress(`Numpad${materialId}`)
-			) {
+		for (let slotIndex = 0; slotIndex < 9; slotIndex += 1) {
+			const keyNumber = slotIndex + 1;
+			const digitPressed = this.input.consumeKeyPress(`Digit${keyNumber}`);
+			const numpadPressed = this.input.consumeKeyPress(`Numpad${keyNumber}`);
+
+			if (!digitPressed && !numpadPressed) {
 				continue;
 			}
 
-			if (getVoxelPaletteEntry(materialId)) {
+			const materialId = getHotbarMaterialId(slotIndex);
+
+			if (materialId !== null && isSelectableVoxelMaterial(materialId)) {
 				this.state.selectedVoxelId = materialId;
 			}
 
 			return;
 		}
+	}
+
+	private resolveSelectionOperation(): SelectionOperation {
+		if (this.input.isKeyDown('AltLeft') || this.input.isKeyDown('AltRight')) {
+			return 'subtract';
+		}
+
+		if (this.input.isShiftDown()) {
+			return 'add';
+		}
+
+		return 'replace';
+	}
+
+	private isConnectedSelectionModifierDown(): boolean {
+		return (
+			this.input.isKeyDown('ControlLeft') ||
+			this.input.isKeyDown('ControlRight') ||
+			this.input.isKeyDown('MetaLeft') ||
+			this.input.isKeyDown('MetaRight')
+		);
+	}
+
+	private applySelectionClick(blockId: VoxelBlockId | null): void {
+		if (blockId === null) {
+			return;
+		}
+
+		let changed = false;
+
+		if (this.selectionOperation === 'add') {
+			if (!this.selectedBlockIds.has(blockId)) {
+				this.selectedBlockIds.add(blockId);
+				changed = true;
+			}
+		} else if (this.selectionOperation === 'subtract') {
+			changed = this.selectedBlockIds.delete(blockId);
+		} else if (this.selectedBlockIds.has(blockId)) {
+			this.selectedBlockIds.delete(blockId);
+			changed = true;
+		} else {
+			this.selectedBlockIds.add(blockId);
+			changed = true;
+		}
+
+		if (changed) {
+			this.refreshSelectionHighlights();
+		}
+	}
+
+	private appendConnectedSelection(blockId: VoxelBlockId | null): void {
+		if (blockId === null) {
+			return;
+		}
+
+		const block = this.world.blocks.get(blockId);
+
+		if (!block) {
+			return;
+		}
+
+		let changed = false;
+
+		for (const connectedBlockId of collectConnectedMatchingBlockIds(this.world, block)) {
+			if (this.selectedBlockIds.has(connectedBlockId)) {
+				continue;
+			}
+
+			this.selectedBlockIds.add(connectedBlockId);
+			changed = true;
+		}
+
+		if (changed) {
+			this.refreshSelectionHighlights();
+		}
+	}
+
+	private applySelectionBox(box: WorldBox, operation: SelectionOperation): void {
+		const blockIds = collectBlockIdsInSelectionBox(this.world, box);
+		let changed = false;
+
+		if (operation === 'replace') {
+			const nextSelected = new Set(blockIds);
+
+			if (!areBlockIdSetsEqual(this.selectedBlockIds, nextSelected)) {
+				this.selectedBlockIds.clear();
+
+				for (const blockId of nextSelected) {
+					this.selectedBlockIds.add(blockId);
+				}
+
+				changed = true;
+			}
+		} else if (operation === 'add') {
+			for (const blockId of blockIds) {
+				if (!this.selectedBlockIds.has(blockId)) {
+					this.selectedBlockIds.add(blockId);
+					changed = true;
+				}
+			}
+		} else {
+			for (const blockId of blockIds) {
+				if (this.selectedBlockIds.delete(blockId)) {
+					changed = true;
+				}
+			}
+		}
+
+		if (changed) {
+			this.refreshSelectionHighlights();
+		}
+	}
+
+	private pruneSelection(): void {
+		let changed = false;
+
+		for (const blockId of [...this.selectedBlockIds]) {
+			if (this.world.blocks.has(blockId)) {
+				continue;
+			}
+
+			this.selectedBlockIds.delete(blockId);
+			changed = true;
+		}
+
+		if (changed) {
+			this.refreshSelectionHighlights();
+		}
+	}
+
+	private clearSelection(): void {
+		if (this.selectedBlockIds.size === 0) {
+			return;
+		}
+
+		this.selectedBlockIds.clear();
+		this.refreshSelectionHighlights();
+	}
+
+	private refreshSelectionHighlights(): void {
+		clearGroupChildren(this.selectionRoot);
+
+		for (const blockId of this.selectedBlockIds) {
+			const block = this.world.blocks.get(blockId);
+
+			if (!block) {
+				continue;
+			}
+
+			this.selectionRoot.add(
+				createSelectionPreviewBlock(
+					block.origin,
+					block.size,
+					this.selectionBoxGeometry,
+					this.selectionEdgesGeometry,
+					this.selectionFillMaterial,
+					this.selectionWireMaterial
+				)
+			);
+		}
+
+		this.selectionRoot.visible = this.selectedBlockIds.size > 0;
+	}
+
+	private getSuggestedPropPlacementOrigin(prop: PropDefinition): WorldCoord {
+		const footprintX = prop.bounds.max.x - prop.bounds.min.x + 1;
+		const footprintZ = prop.bounds.max.z - prop.bounds.min.z + 1;
+		const forward = new THREE.Vector3(-Math.sin(this.player.yaw), 0, -Math.cos(this.player.yaw));
+		const preferredDistance =
+			this.player.collider.halfWidth +
+			Math.max(footprintX, footprintZ) * 0.5 +
+			Math.max(6, DEFAULT_VOXEL_SIZE * 1.5);
+		const center = this.player.position.clone().add(forward.multiplyScalar(preferredDistance));
+		const baseOrigin = {
+			x: Math.round(center.x - footprintX * 0.5 - prop.bounds.min.x),
+			y: Math.round(this.player.position.y),
+			z: Math.round(center.z - footprintZ * 0.5 - prop.bounds.min.z)
+		};
+		let bestOrigin: WorldCoord | null = null;
+		let bestSupportGap = Number.POSITIVE_INFINITY;
+		let bestVerticalOffset = Number.POSITIVE_INFINITY;
+
+		for (const verticalOffset of createVerticalSearchOrder(48)) {
+			const candidateOrigin = {
+				x: baseOrigin.x,
+				y: baseOrigin.y + verticalOffset,
+				z: baseOrigin.z
+			};
+			const resolvedBlocks = resolvePropDefinitionBlocks(prop, candidateOrigin, {
+				x: 0,
+				y: 0,
+				z: 0
+			});
+
+			if (!this.canPlacePropBlocks(resolvedBlocks)) {
+				continue;
+			}
+
+			const supportGap = getPropSupportGap(this.world, resolvedBlocks);
+			const absoluteOffset = Math.abs(verticalOffset);
+
+			if (
+				supportGap < bestSupportGap ||
+				(supportGap === bestSupportGap && absoluteOffset < bestVerticalOffset)
+			) {
+				bestOrigin = candidateOrigin;
+				bestSupportGap = supportGap;
+				bestVerticalOffset = absoluteOffset;
+			}
+
+			if (supportGap === 0 && verticalOffset >= 0) {
+				break;
+			}
+		}
+
+		return bestOrigin ?? baseOrigin;
+	}
+
+	private rebuildPropPlacementPreview(prop: PropDefinition): void {
+		clearGroupChildren(this.propPlacementRoot);
+
+		for (const block of prop.blocks) {
+			this.propPlacementRoot.add(
+				createPropPlacementPreviewBlock(
+					block.origin,
+					block.size,
+					this.propPlacementBoxGeometry,
+					this.propPlacementEdgesGeometry,
+					this.propPlacementFillMaterial,
+					this.propPlacementWireMaterial
+				)
+			);
+		}
+	}
+
+	private syncPropPlacementFromRoot(): void {
+		if (!this.activePropPlacement) {
+			return;
+		}
+
+		const origin = worldVectorToWorldCoord(this.propPlacementRoot.position);
+		const rotationQuarterTurns = normalizeQuarterTurns({
+			x: Math.round(this.propPlacementRoot.rotation.x / (Math.PI * 0.5)),
+			y: Math.round(this.propPlacementRoot.rotation.y / (Math.PI * 0.5)),
+			z: Math.round(this.propPlacementRoot.rotation.z / (Math.PI * 0.5))
+		});
+
+		this.propPlacementRoot.position.copy(worldCoordToWorldVector(origin));
+		this.propPlacementRoot.rotation.set(
+			rotationQuarterTurns.x * Math.PI * 0.5,
+			rotationQuarterTurns.y * Math.PI * 0.5,
+			rotationQuarterTurns.z * Math.PI * 0.5,
+			'XYZ'
+		);
+
+		const resolvedBlocks = resolvePropDefinitionBlocks(
+			this.activePropPlacement.prop,
+			origin,
+			rotationQuarterTurns
+		);
+		const valid = this.canPlacePropBlocks(resolvedBlocks);
+
+		this.activePropPlacement.origin = origin;
+		this.activePropPlacement.rotationQuarterTurns = rotationQuarterTurns;
+		this.activePropPlacement.resolvedBlocks = resolvedBlocks;
+		this.activePropPlacement.valid = valid;
+		this.setPropPlacementPreviewColor(valid ? PROP_VALID_COLOR : PROP_INVALID_COLOR);
+	}
+
+	private canPlacePropBlocks(blocks: ReadonlyArray<PropDefinitionBlock>): boolean {
+		for (const block of blocks) {
+			if (
+				!Number.isInteger(block.origin.x) ||
+				!Number.isInteger(block.origin.y) ||
+				!Number.isInteger(block.origin.z) ||
+				!Number.isInteger(block.size) ||
+				block.size < 1 ||
+				!this.world.canPlaceBlockIgnoringWater(block.origin, block.size) ||
+				!this.player.canPlaceBlockAt(block.origin, block.size)
+			) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	private setPropPlacementPreviewColor(color: THREE.Color): void {
+		this.propPlacementFillMaterial.color.copy(color);
+		this.propPlacementWireMaterial.color.copy(color);
+	}
+
+	private confirmPropPlacement(): void {
+		if (!this.activePropPlacement || !this.activePropPlacement.valid) {
+			return;
+		}
+
+		this.captureUndoSnapshot();
+		const result = createVoxelCommandResult();
+		const displacedWaterBlocks = new Map<number, VoxelBlock>();
+
+		for (const block of this.activePropPlacement.resolvedBlocks) {
+			for (const waterBlock of this.world.getOverlappingWaterBlocks(block.origin, block.size)) {
+				displacedWaterBlocks.set(waterBlock.id, waterBlock);
+			}
+		}
+
+		const placed = this.world.placePropInstance(
+			this.activePropPlacement.prop.id,
+			this.activePropPlacement.origin,
+			this.activePropPlacement.rotationQuarterTurns,
+			this.activePropPlacement.resolvedBlocks,
+			{ displaceWater: true }
+		);
+
+		if (!placed) {
+			this.pendingUndoSnapshot = null;
+			this.hasCommittedPendingUndo = false;
+			this.syncPropPlacementFromRoot();
+			return;
+		}
+
+		for (const block of this.activePropPlacement.resolvedBlocks) {
+			this.world.collectAffectedChunkKeysForBlock(
+				block.origin,
+				block.size,
+				result.affectedChunkKeys
+			);
+			result.changedVoxelCount += block.size ** 3;
+		}
+
+		for (const waterBlock of displacedWaterBlocks.values()) {
+			this.world.collectAffectedChunkKeysForBlock(
+				waterBlock.origin,
+				waterBlock.size,
+				result.affectedChunkKeys
+			);
+			result.changedVoxelCount += waterBlock.size ** 3;
+		}
+
+		this.commitPendingUndoSnapshot();
+
+		for (const chunkKey of result.affectedChunkKeys) {
+			this.pendingChunkKeys.add(chunkKey);
+		}
+
+		this.cancelPropPlacement();
+	}
+
+	private cancelPropPlacement(reopenManager = false): void {
+		this.activePropPlacement = null;
+		this.transformControls.detach();
+		this.transformControls.enabled = false;
+		this.transformControlsHelper.visible = false;
+		this.propPlacementRoot.visible = false;
+		clearPropPlacement();
+		this.pendingUndoSnapshot = null;
+		this.hasCommittedPendingUndo = false;
+
+		if (reopenManager) {
+			openPropManager();
+		}
+	}
+
+	private clearSelectionDrag(): void {
+		this.selectionDragStartCell = null;
+		this.selectionClickBlockId = null;
+		this.selectionOperation = 'replace';
+		this.selectionConnectedAppend = false;
+		this.selectionWasDragged = false;
+		this.state.previewBox = null;
 	}
 
 	private consumePendingChunkKeys(): Set<ChunkKey> {
@@ -329,6 +1142,10 @@ export class EditorController {
 	}
 
 	private getModeColor(): THREE.Color {
+		if (this.state.selectionEnabled) {
+			return SELECT_COLOR;
+		}
+
 		switch (this.state.mode) {
 			case 'remove':
 				return REMOVE_COLOR;
@@ -371,7 +1188,12 @@ export class EditorController {
 	}
 
 	private captureUndoSnapshot(): void {
-		this.pendingUndoSnapshot = cloneWorldSnapshot(this.world.getBlocks());
+		this.pendingUndoSnapshot = {
+			blocks: cloneWorldSnapshot(this.world.getBlocks()),
+			propInstances: clonePropInstanceSnapshot(this.world.getPropInstances()),
+			palette: clonePaletteStateSnapshot(createSerializedVoxelPaletteState()),
+			props: clonePropLibraryStateSnapshot(createSerializedPropLibraryState())
+		};
 		this.hasCommittedPendingUndo = false;
 	}
 
@@ -380,7 +1202,7 @@ export class EditorController {
 			return;
 		}
 
-		this.undoStack.push(this.pendingUndoSnapshot);
+		this.undoStack.push(cloneProjectSnapshot(this.pendingUndoSnapshot));
 
 		if (this.undoStack.length > MAX_UNDO_ENTRIES) {
 			this.undoStack.splice(0, this.undoStack.length - MAX_UNDO_ENTRIES);
@@ -398,12 +1220,18 @@ export class EditorController {
 		}
 
 		this.clearInteraction();
+		this.clearSelectionDrag();
 		this.pendingChunkKeys.clear();
 
-		if (!this.applyWorldSnapshot(cloneWorldSnapshot(snapshot))) {
+		if (!this.applyWorldSnapshot(cloneProjectSnapshot(snapshot))) {
 			this.undoStack.push(snapshot);
 		}
 	}
+
+	private readonly handleTransformObjectChange = (): void => {
+		this.syncPropPlacementFromRoot();
+		this.updatePreviewState();
+	};
 }
 
 function createWireCube(color: THREE.ColorRepresentation, opacity: number): THREE.LineSegments {
@@ -418,7 +1246,6 @@ function createWireCube(color: THREE.ColorRepresentation, opacity: number): THRE
 
 	helper.visible = false;
 	helper.renderOrder = 20;
-
 	return helper;
 }
 
@@ -435,8 +1262,51 @@ function createGhostCube(color: THREE.ColorRepresentation, opacity: number): THR
 
 	mesh.visible = false;
 	mesh.renderOrder = 19;
-
 	return mesh;
+}
+
+function createSelectionPreviewBlock(
+	origin: WorldCoord,
+	size: number,
+	boxGeometry: THREE.BoxGeometry,
+	edgesGeometry: THREE.EdgesGeometry,
+	fillMaterial: THREE.MeshBasicMaterial,
+	wireMaterial: THREE.LineBasicMaterial
+): THREE.Group {
+	const group = new THREE.Group();
+	const mesh = new THREE.Mesh(boxGeometry, fillMaterial);
+	const wireframe = new THREE.LineSegments(edgesGeometry, wireMaterial);
+
+	group.add(mesh, wireframe);
+	group.position.set(origin.x + size * 0.5, origin.y + size * 0.5, origin.z + size * 0.5);
+	group.scale.set(size, size, size);
+	group.renderOrder = 18;
+	return group;
+}
+
+function createPropPlacementPreviewBlock(
+	origin: WorldCoord,
+	size: number,
+	boxGeometry: THREE.BoxGeometry,
+	edgesGeometry: THREE.EdgesGeometry,
+	fillMaterial: THREE.MeshBasicMaterial,
+	wireMaterial: THREE.LineBasicMaterial
+): THREE.Group {
+	const group = new THREE.Group();
+	const mesh = new THREE.Mesh(boxGeometry, fillMaterial);
+	const wireframe = new THREE.LineSegments(edgesGeometry, wireMaterial);
+	const scaledSize = size * VOXEL_WORLD_SIZE;
+	const halfSize = scaledSize * 0.5;
+
+	group.add(mesh, wireframe);
+	group.position.set(
+		origin.x * VOXEL_WORLD_SIZE + halfSize,
+		origin.y * VOXEL_WORLD_SIZE + halfSize,
+		origin.z * VOXEL_WORLD_SIZE + halfSize
+	);
+	group.scale.setScalar(scaledSize);
+	group.renderOrder = 21;
+	return group;
 }
 
 function positionBoxPreview(object: THREE.Object3D, box: WorldBox, scaleOffset: number): void {
@@ -490,10 +1360,264 @@ function disposePreviewObject(object: THREE.Object3D): void {
 	});
 }
 
-function cloneWorldSnapshot(blocks: WorldSnapshot): WorldSnapshot {
+function clearGroupChildren(group: THREE.Group): void {
+	for (const child of [...group.children]) {
+		group.remove(child);
+	}
+}
+
+function collectBlockIdsInSelectionBox(world: VoxelWorld, box: WorldBox): Set<VoxelBlockId> {
+	const blockIds = new Set<VoxelBlockId>();
+
+	for (const block of world.blocks.values()) {
+		const blockMaxX = block.origin.x + block.size - 1;
+		const blockMaxY = block.origin.y + block.size - 1;
+		const blockMaxZ = block.origin.z + block.size - 1;
+		const intersects =
+			block.origin.x <= box.max.x &&
+			blockMaxX >= box.min.x &&
+			block.origin.y <= box.max.y &&
+			blockMaxY >= box.min.y &&
+			block.origin.z <= box.max.z &&
+			blockMaxZ >= box.min.z;
+
+		if (intersects) {
+			blockIds.add(block.id);
+		}
+	}
+
+	return blockIds;
+}
+
+function collectConnectedMatchingBlockIds(
+	world: VoxelWorld,
+	startBlock: Pick<VoxelBlock, 'id' | 'materialId' | 'origin' | 'size'>
+): Set<VoxelBlockId> {
+	const visited = new Set<VoxelBlockId>([startBlock.id]);
+	const queue: VoxelBlockId[] = [startBlock.id];
+
+	while (queue.length > 0) {
+		const currentBlockId = queue.shift();
+
+		if (currentBlockId === undefined) {
+			continue;
+		}
+
+		const currentBlock = world.blocks.get(currentBlockId);
+
+		if (!currentBlock) {
+			continue;
+		}
+
+		for (const neighborBlockId of getMatchingNeighborBlockIds(world, currentBlock)) {
+			if (visited.has(neighborBlockId)) {
+				continue;
+			}
+
+			visited.add(neighborBlockId);
+			queue.push(neighborBlockId);
+		}
+	}
+
+	return visited;
+}
+
+function getMatchingNeighborBlockIds(
+	world: VoxelWorld,
+	block: Pick<VoxelBlock, 'id' | 'materialId' | 'origin' | 'size'>
+): Set<VoxelBlockId> {
+	const neighborIds = new Set<VoxelBlockId>();
+
+	for (let z = block.origin.z; z < block.origin.z + block.size; z += 1) {
+		for (let y = block.origin.y; y < block.origin.y + block.size; y += 1) {
+			collectMatchingNeighborBlockId(world, block, block.origin.x - 1, y, z, neighborIds);
+			collectMatchingNeighborBlockId(world, block, block.origin.x + block.size, y, z, neighborIds);
+		}
+	}
+
+	for (let z = block.origin.z; z < block.origin.z + block.size; z += 1) {
+		for (let x = block.origin.x; x < block.origin.x + block.size; x += 1) {
+			collectMatchingNeighborBlockId(world, block, x, block.origin.y - 1, z, neighborIds);
+			collectMatchingNeighborBlockId(world, block, x, block.origin.y + block.size, z, neighborIds);
+		}
+	}
+
+	for (let y = block.origin.y; y < block.origin.y + block.size; y += 1) {
+		for (let x = block.origin.x; x < block.origin.x + block.size; x += 1) {
+			collectMatchingNeighborBlockId(world, block, x, y, block.origin.z - 1, neighborIds);
+			collectMatchingNeighborBlockId(world, block, x, y, block.origin.z + block.size, neighborIds);
+		}
+	}
+
+	return neighborIds;
+}
+
+function collectMatchingNeighborBlockId(
+	world: VoxelWorld,
+	block: Pick<VoxelBlock, 'id' | 'materialId' | 'size'>,
+	x: number,
+	y: number,
+	z: number,
+	neighborIds: Set<VoxelBlockId>
+): void {
+	const neighborBlock = world.getBlockAt(x, y, z);
+
+	if (
+		!neighborBlock ||
+		neighborBlock.id === block.id ||
+		neighborBlock.materialId !== block.materialId ||
+		neighborBlock.size !== block.size
+	) {
+		return;
+	}
+
+	neighborIds.add(neighborBlock.id);
+}
+
+function areBlockIdSetsEqual(a: ReadonlySet<VoxelBlockId>, b: ReadonlySet<VoxelBlockId>): boolean {
+	if (a.size !== b.size) {
+		return false;
+	}
+
+	for (const value of a) {
+		if (!b.has(value)) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+function areWorldCoordsEqual(a: WorldCoord, b: WorldCoord): boolean {
+	return a.x === b.x && a.y === b.y && a.z === b.z;
+}
+
+function worldCoordToWorldVector(coord: WorldCoord): THREE.Vector3 {
+	return new THREE.Vector3(
+		coord.x * VOXEL_WORLD_SIZE,
+		coord.y * VOXEL_WORLD_SIZE,
+		coord.z * VOXEL_WORLD_SIZE
+	);
+}
+
+function worldVectorToWorldCoord(vector: THREE.Vector3): WorldCoord {
+	return {
+		x: Math.round(vector.x / VOXEL_WORLD_SIZE),
+		y: Math.round(vector.y / VOXEL_WORLD_SIZE),
+		z: Math.round(vector.z / VOXEL_WORLD_SIZE)
+	};
+}
+
+function createVerticalSearchOrder(maxOffset: number): number[] {
+	const offsets = [0];
+
+	for (let offset = 1; offset <= maxOffset; offset += 1) {
+		offsets.push(-offset, offset);
+	}
+
+	return offsets;
+}
+
+function getPropSupportGap(world: VoxelWorld, blocks: ReadonlyArray<PropDefinitionBlock>): number {
+	const bottomByColumn = new Map<string, number>();
+
+	for (const block of blocks) {
+		for (let z = block.origin.z; z < block.origin.z + block.size; z += 1) {
+			for (let x = block.origin.x; x < block.origin.x + block.size; x += 1) {
+				const columnKey = `${x},${z}`;
+				const currentBottom = bottomByColumn.get(columnKey);
+
+				if (currentBottom === undefined || block.origin.y < currentBottom) {
+					bottomByColumn.set(columnKey, block.origin.y);
+				}
+			}
+		}
+	}
+
+	let bestGap = Number.POSITIVE_INFINITY;
+
+	for (const [columnKey, bottomY] of bottomByColumn) {
+		const [xText, zText] = columnKey.split(',');
+		const x = Number.parseInt(xText ?? '0', 10);
+		const z = Number.parseInt(zText ?? '0', 10);
+
+		for (let y = bottomY - 1, gap = 0; gap <= 64; y -= 1, gap += 1) {
+			if (world.getVoxel(x, y, z) === VOXEL_AIR) {
+				continue;
+			}
+
+			bestGap = Math.min(bestGap, gap);
+			break;
+		}
+	}
+
+	return bestGap;
+}
+
+function cloneProjectSnapshot(snapshot: ProjectSnapshot): ProjectSnapshot {
+	return {
+		blocks: cloneWorldSnapshot(snapshot.blocks),
+		propInstances: clonePropInstanceSnapshot(snapshot.propInstances),
+		palette: clonePaletteStateSnapshot(snapshot.palette),
+		props: clonePropLibraryStateSnapshot(snapshot.props)
+	};
+}
+
+function cloneWorldSnapshot(blocks: WorldSnapshot): SerializedWorldBlock[] {
 	return blocks.map((block) => ({
 		materialId: block.materialId,
 		origin: { ...block.origin },
-		size: block.size
+		size: block.size,
+		propInstanceId: block.propInstanceId
 	}));
+}
+
+function clonePropInstanceSnapshot(
+	propInstances: PropInstanceSnapshot
+): SerializedWorldPropInstance[] {
+	return propInstances.map((propInstance) => ({
+		id: propInstance.id,
+		propId: propInstance.propId,
+		origin: { ...propInstance.origin },
+		rotationQuarterTurns: { ...propInstance.rotationQuarterTurns }
+	}));
+}
+
+function clonePaletteStateSnapshot(
+	state: SerializedVoxelPaletteState
+): SerializedVoxelPaletteState {
+	return {
+		materials: state.materials.map((material) => ({
+			id: material.id,
+			name: material.name,
+			color: [...material.color] as [number, number, number],
+			opacity: material.opacity,
+			isWater: material.isWater ?? false,
+			emitsLight: material.emitsLight ?? false,
+			lightTint: [...(material.lightTint ?? material.color)] as [number, number, number],
+			archived: material.archived
+		})),
+		hotbar: [...state.hotbar]
+	};
+}
+
+function clonePropLibraryStateSnapshot(
+	state: SerializedPropLibraryState
+): SerializedPropLibraryState {
+	return {
+		props: state.props.map((prop) => ({
+			id: prop.id,
+			name: prop.name,
+			interactable: prop.interactable,
+			blocks: prop.blocks.map((block) => ({
+				materialId: block.materialId,
+				origin: { ...block.origin },
+				size: block.size
+			})),
+			bounds: {
+				min: { ...prop.bounds.min },
+				max: { ...prop.bounds.max }
+			}
+		}))
+	};
 }

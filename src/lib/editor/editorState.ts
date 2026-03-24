@@ -18,6 +18,7 @@ export type DragMode = 'single' | 'region';
 
 export interface EditorState {
 	enabled: boolean;
+	selectionEnabled: boolean;
 	activeTool: EditorToolType;
 	selectedVoxelId: number;
 	selectedVoxelSize: number;
@@ -31,6 +32,7 @@ export interface EditorState {
 export function createEditorState(): EditorState {
 	return {
 		enabled: false,
+		selectionEnabled: false,
 		activeTool: 'brush-add',
 		selectedVoxelId: DEFAULT_SELECTED_VOXEL_ID,
 		selectedVoxelSize: DEFAULT_VOXEL_SIZE,

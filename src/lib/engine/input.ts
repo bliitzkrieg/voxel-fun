@@ -6,6 +6,8 @@ export class InputState {
 	private readonly pressedButtons = new Set<number>();
 	private readonly releasedButtons = new Set<number>();
 	private pointerLocked = false;
+	private pointerLockSuppressed = false;
+	private freeLookEnabled = false;
 	private shiftDown = false;
 	private mouseDx = 0;
 	private mouseDy = 0;
@@ -85,9 +87,40 @@ export class InputState {
 		return this.pointerLocked;
 	}
 
+	canApplyMouseLook(): boolean {
+		return this.pointerLocked || this.freeLookEnabled;
+	}
+
 	requestPointerLock(): void {
+		if (this.pointerLockSuppressed) {
+			return;
+		}
+
 		if ('requestPointerLock' in this.element) {
 			void this.element.requestPointerLock();
+		}
+	}
+
+	setPointerLockSuppressed(suppressed: boolean): void {
+		this.pointerLockSuppressed = suppressed;
+	}
+
+	setFreeLookEnabled(enabled: boolean): void {
+		if (this.freeLookEnabled === enabled) {
+			return;
+		}
+
+		this.freeLookEnabled = enabled;
+
+		if (!enabled && !this.pointerLocked) {
+			this.mouseDx = 0;
+			this.mouseDy = 0;
+		}
+	}
+
+	exitPointerLock(): void {
+		if (document.pointerLockElement === this.element) {
+			document.exitPointerLock();
 		}
 	}
 
@@ -128,7 +161,7 @@ export class InputState {
 	private handleMouseMove = (event: MouseEvent): void => {
 		this.shiftDown = event.shiftKey;
 
-		if (!this.pointerLocked) {
+		if (!this.pointerLocked && !(this.freeLookEnabled && this.isPointerOverElement(event))) {
 			return;
 		}
 
@@ -141,6 +174,12 @@ export class InputState {
 		this.shiftDown = event.shiftKey;
 
 		if (!this.pointerLocked) {
+			if (this.pointerLockSuppressed) {
+				this.buttons.add(event.button);
+				this.pressedButtons.add(event.button);
+				return;
+			}
+
 			this.requestPointerLock();
 			return;
 		}
@@ -194,4 +233,15 @@ export class InputState {
 		this.mouseDy = 0;
 		this.wheelSteps = 0;
 	};
+
+	private isPointerOverElement(event: MouseEvent): boolean {
+		const rect = this.element.getBoundingClientRect();
+
+		return (
+			event.clientX >= rect.left &&
+			event.clientX <= rect.right &&
+			event.clientY >= rect.top &&
+			event.clientY <= rect.bottom
+		);
+	}
 }

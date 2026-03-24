@@ -1,6 +1,7 @@
 import type { EditorTool, EditorToolContext } from '$lib/editor/editorTool';
 import { getToolTargetCoord, worldCoordToKey } from '$lib/editor/editorTargets';
 import { VOXEL_AIR } from '$lib/voxel/constants';
+import { isSelectableVoxelMaterial } from '$lib/voxel/voxelPalette';
 import { paintVoxelCommand, setVoxelCommand } from '$lib/voxel/voxelCommands';
 import type { VoxelHit } from '$lib/voxel/voxelRaycast';
 import type { WorldCoord } from '$lib/voxel/voxelTypes';
@@ -54,6 +55,10 @@ export class BrushTool implements EditorTool {
 
 		switch (context.editorState.activeTool) {
 			case 'brush-add':
+				if (!isSelectableVoxelMaterial(materialId)) {
+					return;
+				}
+
 				if (!context.player.canPlaceBlockAt(target, context.editorState.selectedVoxelSize)) {
 					return;
 				}
@@ -71,6 +76,10 @@ export class BrushTool implements EditorTool {
 				result = setVoxelCommand(context.world, target.x, target.y, target.z, VOXEL_AIR);
 				break;
 			case 'brush-paint':
+				if (!isSelectableVoxelMaterial(materialId)) {
+					return;
+				}
+
 				result = paintVoxelCommand(context.world, target.x, target.y, target.z, materialId);
 				break;
 			default:

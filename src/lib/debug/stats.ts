@@ -18,9 +18,13 @@ export interface DebugSnapshot {
 }
 
 export class DebugStats {
+	private static readonly RENDER_INTERVAL_MS = 125;
+
 	private readonly element: HTMLDivElement;
 	private lastFrameTime = 0;
+	private lastRenderTime = 0;
 	private fps = 0;
+	private pendingRender = true;
 	private snapshot: DebugSnapshot = {
 		position: { x: 0, y: 0, z: 0 },
 		onGround: false,
@@ -45,7 +49,7 @@ export class DebugStats {
 
 	update(snapshot: DebugSnapshot): void {
 		this.snapshot = snapshot;
-		this.render();
+		this.pendingRender = true;
 	}
 
 	recordFrame(now: number = performance.now()): void {
@@ -55,7 +59,12 @@ export class DebugStats {
 		}
 
 		this.lastFrameTime = now;
-		this.render();
+
+		if (this.pendingRender && now - this.lastRenderTime >= DebugStats.RENDER_INTERVAL_MS) {
+			this.render();
+			this.lastRenderTime = now;
+			this.pendingRender = false;
+		}
 	}
 
 	dispose(): void {

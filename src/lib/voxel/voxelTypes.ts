@@ -1,6 +1,8 @@
 export type ChunkKey = string;
 export type VoxelId = number;
 export type VoxelBlockId = number;
+export type PropId = number;
+export type PropInstanceId = number;
 
 export interface ChunkCoord {
 	x: number;
@@ -30,6 +32,34 @@ export interface VoxelBlock {
 	materialId: VoxelId;
 	origin: WorldCoord;
 	size: number;
+	propInstanceId: PropInstanceId | null;
+}
+
+export interface PropDefinitionBlock {
+	materialId: VoxelId;
+	origin: WorldCoord;
+	size: number;
+}
+
+export interface PropDefinition {
+	id: PropId;
+	name: string;
+	interactable: boolean;
+	blocks: PropDefinitionBlock[];
+	bounds: WorldBox;
+}
+
+export interface PropInstanceRotation {
+	x: number;
+	y: number;
+	z: number;
+}
+
+export interface PropInstance {
+	id: PropInstanceId;
+	propId: PropId;
+	origin: WorldCoord;
+	rotationQuarterTurns: PropInstanceRotation;
 }
 
 export function createWorldBox(min: WorldCoord, max: WorldCoord): WorldBox {

@@ -197,6 +197,8 @@ function applyBlockWrite(
 		return;
 	}
 
+	detachPropInstanceAt(world, origin.x, origin.y, origin.z, result);
+
 	const block = world.placeBlock(origin, size, voxelId);
 
 	if (!block) {
@@ -213,6 +215,7 @@ function applyBlockRemove(
 	z: number,
 	result: VoxelCommandResult
 ): void {
+	detachPropInstanceAt(world, x, y, z, result);
 	const block = world.removeBlockAt(x, y, z);
 
 	if (!block) {
@@ -227,6 +230,7 @@ function applyBlockRemoveById(
 	blockId: VoxelBlockId,
 	result: VoxelCommandResult
 ): void {
+	detachPropInstanceByBlockId(world, blockId, result);
 	const block = world.removeBlockById(blockId);
 
 	if (!block) {
@@ -273,6 +277,8 @@ function applyBlockPaintById(
 		return;
 	}
 
+	detachPropInstanceByBlockId(world, blockId, result);
+
 	const block =
 		voxelId === VOXEL_AIR
 			? world.removeBlockById(blockId)
@@ -306,6 +312,51 @@ function recordChangedBlock(
 ): void {
 	world.collectAffectedChunkKeysForBlock(block.origin, block.size, result.affectedChunkKeys);
 	result.changedVoxelCount += block.size ** 3;
+}
+
+function detachPropInstanceAt(
+	world: VoxelWorld,
+	x: number,
+	y: number,
+	z: number,
+	result: VoxelCommandResult
+): void {
+	const block = world.getBlockAt(x, y, z);
+
+	if (!block) {
+		return;
+	}
+
+	detachPropInstanceByBlockId(world, block.id, result);
+}
+
+function detachPropInstanceByBlockId(
+	world: VoxelWorld,
+	blockId: VoxelBlockId,
+	result: VoxelCommandResult
+): void {
+	const block = world.blocks.get(blockId);
+
+	if (!block || block.propInstanceId === null) {
+		return;
+	}
+
+	const propInstanceBlockIds = world.getPropInstanceBlockIds(block.propInstanceId);
+	const propBlocks = [...propInstanceBlockIds]
+		.map((linkedBlockId) => world.blocks.get(linkedBlockId))
+		.filter((linkedBlock): linkedBlock is VoxelBlock => !!linkedBlock);
+
+	if (!world.detachPropInstance(block.propInstanceId)) {
+		return;
+	}
+
+	for (const propBlock of propBlocks) {
+		world.collectAffectedChunkKeysForBlock(
+			propBlock.origin,
+			propBlock.size,
+			result.affectedChunkKeys
+		);
+	}
 }
 
 function collectBlockIdsInBox(world: VoxelWorld, bounds: WorldBox): Set<VoxelBlockId> {

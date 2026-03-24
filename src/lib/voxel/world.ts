@@ -1,19 +1,42 @@
 import { CHUNK_SIZE, VOXEL_AIR } from '$lib/voxel/constants';
 import { VoxelChunk } from '$lib/voxel/chunk';
+import { isWaterVoxelMaterial } from '$lib/voxel/voxelPalette';
 import type {
 	ChunkCoord,
 	ChunkKey,
 	LocalCoord,
+	PropDefinitionBlock,
+	PropId,
+	PropInstance,
+	PropInstanceId,
+	PropInstanceRotation,
 	VoxelBlock,
 	VoxelBlockId,
 	VoxelId,
 	WorldCoord
 } from '$lib/voxel/voxelTypes';
 
+export interface SerializedWorldBlock {
+	materialId: VoxelId;
+	origin: WorldCoord;
+	size: number;
+	propInstanceId: PropInstanceId | null;
+}
+
+export interface SerializedWorldPropInstance {
+	id: PropInstanceId;
+	propId: PropId;
+	origin: WorldCoord;
+	rotationQuarterTurns: PropInstanceRotation;
+}
+
 export class VoxelWorld {
 	chunks: Map<ChunkKey, VoxelChunk> = new Map();
 	blocks: Map<VoxelBlockId, VoxelBlock> = new Map();
+	propInstances: Map<PropInstanceId, PropInstance> = new Map();
+
 	private nextBlockId: VoxelBlockId = 1;
+	private nextPropInstanceId: PropInstanceId = 1;
 
 	getChunkKey(x: number, y: number, z: number): ChunkKey {
 		return `${x},${y},${z}`;
@@ -64,23 +87,29 @@ export class VoxelWorld {
 	setVoxel(wx: number, wy: number, wz: number, id: VoxelId): boolean {
 		const existingBlock = this.getBlockAt(wx, wy, wz);
 
+		if (existingBlock && existingBlock.propInstanceId !== null) {
+			this.detachPropInstance(existingBlock.propInstanceId);
+		}
+
+		const nextExistingBlock = this.getBlockAt(wx, wy, wz);
+
 		if (id === VOXEL_AIR) {
 			return this.removeBlockAt(wx, wy, wz) !== null;
 		}
 
 		if (
-			existingBlock &&
-			existingBlock.size === 1 &&
-			existingBlock.materialId === id &&
-			existingBlock.origin.x === wx &&
-			existingBlock.origin.y === wy &&
-			existingBlock.origin.z === wz
+			nextExistingBlock &&
+			nextExistingBlock.size === 1 &&
+			nextExistingBlock.materialId === id &&
+			nextExistingBlock.origin.x === wx &&
+			nextExistingBlock.origin.y === wy &&
+			nextExistingBlock.origin.z === wz
 		) {
 			return false;
 		}
 
-		if (existingBlock) {
-			this.removeBlockById(existingBlock.id);
+		if (nextExistingBlock) {
+			this.removeBlockById(nextExistingBlock.id);
 		}
 
 		return this.placeBlock({ x: wx, y: wy, z: wz }, 1, id) !== null;
@@ -103,26 +132,47 @@ export class VoxelWorld {
 		return chunk.getLocalBlockId(local.x, local.y, local.z);
 	}
 
+	getPropInstance(propInstanceId: PropInstanceId): PropInstance | null {
+		return this.propInstances.get(propInstanceId) ?? null;
+	}
+
+	getPropInstanceAt(wx: number, wy: number, wz: number): PropInstance | null {
+		const block = this.getBlockAt(wx, wy, wz);
+		return block && block.propInstanceId !== null
+			? this.getPropInstance(block.propInstanceId)
+			: null;
+	}
+
 	canPlaceBlock(origin: WorldCoord, size: number): boolean {
 		if (!Number.isInteger(size) || size < 1) {
 			return false;
 		}
 
-		let canPlace = true;
-
-		this.forEachCellInCube(origin, size, (wx, wy, wz) => {
-			if (this.getBlockIdAt(wx, wy, wz) !== 0) {
-				canPlace = false;
-				return false;
-			}
-
-			return true;
-		});
-
-		return canPlace;
+		return this.getOverlappingBlockIds(origin, size).size === 0;
 	}
 
-	placeBlock(origin: WorldCoord, size: number, materialId: VoxelId): VoxelBlock | null {
+	canPlaceBlockIgnoringWater(origin: WorldCoord, size: number): boolean {
+		if (!Number.isInteger(size) || size < 1) {
+			return false;
+		}
+
+		for (const blockId of this.getOverlappingBlockIds(origin, size)) {
+			const block = this.blocks.get(blockId);
+
+			if (block && !isWaterVoxelMaterial(block.materialId)) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	placeBlock(
+		origin: WorldCoord,
+		size: number,
+		materialId: VoxelId,
+		propInstanceId: PropInstanceId | null = null
+	): VoxelBlock | null {
 		if (materialId === VOXEL_AIR || !this.canPlaceBlock(origin, size)) {
 			return null;
 		}
@@ -131,7 +181,8 @@ export class VoxelWorld {
 			id: this.nextBlockId++,
 			materialId,
 			origin: { ...origin },
-			size
+			size,
+			propInstanceId
 		};
 
 		this.blocks.set(block.id, block);
@@ -142,6 +193,67 @@ export class VoxelWorld {
 		this.markChunksDirtyForBlock(block);
 
 		return block;
+	}
+
+	placePropInstance(
+		propId: PropId,
+		origin: WorldCoord,
+		rotationQuarterTurns: PropInstanceRotation,
+		blocks: ReadonlyArray<PropDefinitionBlock>,
+		options: { displaceWater?: boolean } = {}
+	): PropInstance | null {
+		if (!blocks.length) {
+			return null;
+		}
+
+		const overlappingWaterBlockIds = new Set<VoxelBlockId>();
+
+		for (const block of blocks) {
+			const canPlace = options.displaceWater
+				? this.canPlaceBlockIgnoringWater(block.origin, block.size)
+				: this.canPlaceBlock(block.origin, block.size);
+
+			if (!canPlace) {
+				return null;
+			}
+
+			if (!options.displaceWater) {
+				continue;
+			}
+
+			for (const waterBlock of this.getOverlappingWaterBlocks(block.origin, block.size)) {
+				overlappingWaterBlockIds.add(waterBlock.id);
+			}
+		}
+
+		for (const blockId of overlappingWaterBlockIds) {
+			this.removeBlockById(blockId);
+		}
+
+		const propInstance: PropInstance = {
+			id: this.nextPropInstanceId++,
+			propId,
+			origin: { ...origin },
+			rotationQuarterTurns: { ...rotationQuarterTurns }
+		};
+
+		this.propInstances.set(propInstance.id, propInstance);
+
+		for (const block of blocks) {
+			const placedBlock = this.placeBlock(
+				block.origin,
+				block.size,
+				block.materialId,
+				propInstance.id
+			);
+
+			if (!placedBlock) {
+				this.removePropInstance(propInstance.id);
+				return null;
+			}
+		}
+
+		return propInstance;
 	}
 
 	removeBlockAt(wx: number, wy: number, wz: number): VoxelBlock | null {
@@ -169,6 +281,87 @@ export class VoxelWorld {
 		return block;
 	}
 
+	removePropInstance(propInstanceId: PropInstanceId): PropInstance | null {
+		const propInstance = this.propInstances.get(propInstanceId);
+
+		if (!propInstance) {
+			return null;
+		}
+
+		for (const blockId of this.getPropInstanceBlockIds(propInstanceId)) {
+			this.removeBlockById(blockId);
+		}
+
+		this.propInstances.delete(propInstanceId);
+		return propInstance;
+	}
+
+	removePropInstancesByPropId(propId: PropId): PropInstance[] {
+		const removedInstances: PropInstance[] = [];
+
+		for (const propInstance of [...this.propInstances.values()]) {
+			if (propInstance.propId !== propId) {
+				continue;
+			}
+
+			const removed = this.removePropInstance(propInstance.id);
+
+			if (removed) {
+				removedInstances.push(removed);
+			}
+		}
+
+		return removedInstances;
+	}
+
+	detachPropInstance(propInstanceId: PropInstanceId): PropInstance | null {
+		const propInstance = this.propInstances.get(propInstanceId);
+
+		if (!propInstance) {
+			return null;
+		}
+
+		for (const blockId of this.getPropInstanceBlockIds(propInstanceId)) {
+			const block = this.blocks.get(blockId);
+
+			if (!block || block.propInstanceId === null) {
+				continue;
+			}
+
+			block.propInstanceId = null;
+			this.markChunksDirtyForBlock(block);
+		}
+
+		this.propInstances.delete(propInstanceId);
+		return propInstance;
+	}
+
+	getPropInstanceBlockIds(propInstanceId: PropInstanceId): Set<VoxelBlockId> {
+		const blockIds = new Set<VoxelBlockId>();
+
+		for (const block of this.blocks.values()) {
+			if (block.propInstanceId === propInstanceId) {
+				blockIds.add(block.id);
+			}
+		}
+
+		return blockIds;
+	}
+
+	getOverlappingWaterBlocks(origin: WorldCoord, size: number): VoxelBlock[] {
+		const overlappingBlocks: VoxelBlock[] = [];
+
+		for (const blockId of this.getOverlappingBlockIds(origin, size)) {
+			const block = this.blocks.get(blockId);
+
+			if (block && isWaterVoxelMaterial(block.materialId)) {
+				overlappingBlocks.push(block);
+			}
+		}
+
+		return overlappingBlocks;
+	}
+
 	paintBlockAt(wx: number, wy: number, wz: number, materialId: VoxelId): VoxelBlock | null {
 		const block = this.getBlockAt(wx, wy, wz);
 
@@ -181,32 +374,91 @@ export class VoxelWorld {
 		return block;
 	}
 
-	getBlocks(): Array<Pick<VoxelBlock, 'materialId' | 'origin' | 'size'>> {
+	getBlocks(): SerializedWorldBlock[] {
 		return [...this.blocks.values()].map((block) => ({
 			materialId: block.materialId,
 			origin: { ...block.origin },
-			size: block.size
+			size: block.size,
+			propInstanceId: block.propInstanceId
 		}));
 	}
 
-	replaceBlocks(
-		blocks: ReadonlyArray<Pick<VoxelBlock, 'materialId' | 'origin' | 'size'>>
+	getPropInstances(): SerializedWorldPropInstance[] {
+		return [...this.propInstances.values()].map((propInstance) => ({
+			id: propInstance.id,
+			propId: propInstance.propId,
+			origin: { ...propInstance.origin },
+			rotationQuarterTurns: { ...propInstance.rotationQuarterTurns }
+		}));
+	}
+
+	getReferencedMaterialIds(): Set<VoxelId> {
+		const materialIds = new Set<VoxelId>();
+
+		for (const block of this.blocks.values()) {
+			materialIds.add(block.materialId);
+		}
+
+		return materialIds;
+	}
+
+	hasMaterialReference(materialId: VoxelId): boolean {
+		for (const block of this.blocks.values()) {
+			if (block.materialId === materialId) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	replaceBlocks(blocks: ReadonlyArray<SerializedWorldBlock>): boolean {
+		return this.replaceState(blocks, []);
+	}
+
+	replaceState(
+		blocks: ReadonlyArray<SerializedWorldBlock>,
+		propInstances: ReadonlyArray<SerializedWorldPropInstance>
 	): boolean {
 		const nextWorld = new VoxelWorld();
+
+		for (const propInstance of propInstances) {
+			if (!this.isValidPropInstanceDefinition(propInstance)) {
+				return false;
+			}
+
+			nextWorld.propInstances.set(propInstance.id, {
+				id: propInstance.id,
+				propId: propInstance.propId,
+				origin: { ...propInstance.origin },
+				rotationQuarterTurns: { ...propInstance.rotationQuarterTurns }
+			});
+			nextWorld.nextPropInstanceId = Math.max(nextWorld.nextPropInstanceId, propInstance.id + 1);
+		}
 
 		for (const block of blocks) {
 			if (!this.isValidBlockDefinition(block)) {
 				return false;
 			}
 
-			if (!nextWorld.placeBlock(block.origin, block.size, block.materialId)) {
+			if (block.propInstanceId !== null && !nextWorld.propInstances.has(block.propInstanceId)) {
+				return false;
+			}
+
+			if (!nextWorld.placeBlock(block.origin, block.size, block.materialId, block.propInstanceId)) {
 				return false;
 			}
 		}
 
+		if (!nextWorld.hasConsistentPropInstanceLinks()) {
+			return false;
+		}
+
 		this.chunks = nextWorld.chunks;
 		this.blocks = nextWorld.blocks;
+		this.propInstances = nextWorld.propInstances;
 		this.nextBlockId = nextWorld.nextBlockId;
+		this.nextPropInstanceId = nextWorld.nextPropInstanceId;
 		return true;
 	}
 
@@ -265,6 +517,16 @@ export class VoxelWorld {
 		});
 	}
 
+	private hasConsistentPropInstanceLinks(): boolean {
+		for (const block of this.blocks.values()) {
+			if (block.propInstanceId !== null && !this.propInstances.has(block.propInstanceId)) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
 	private forAffectedChunkCoords(
 		coord: ChunkCoord,
 		local: LocalCoord,
@@ -313,6 +575,22 @@ export class VoxelWorld {
 		}
 	}
 
+	private getOverlappingBlockIds(origin: WorldCoord, size: number): Set<VoxelBlockId> {
+		const blockIds = new Set<VoxelBlockId>();
+
+		this.forEachCellInCube(origin, size, (wx, wy, wz) => {
+			const blockId = this.getBlockIdAt(wx, wy, wz);
+
+			if (blockId !== 0) {
+				blockIds.add(blockId);
+			}
+
+			return true;
+		});
+
+		return blockIds;
+	}
+
 	private setBlockIdAt(wx: number, wy: number, wz: number, blockId: VoxelBlockId): void {
 		const chunkCoord = this.getChunkCoordFromWorld(wx, wy, wz);
 		const local = this.getLocalCoord(wx, wy, wz);
@@ -339,9 +617,7 @@ export class VoxelWorld {
 		}
 	}
 
-	private isValidBlockDefinition(
-		block: Pick<VoxelBlock, 'materialId' | 'origin' | 'size'>
-	): boolean {
+	private isValidBlockDefinition(block: SerializedWorldBlock): boolean {
 		return (
 			Number.isInteger(block.materialId) &&
 			block.materialId !== VOXEL_AIR &&
@@ -349,7 +625,24 @@ export class VoxelWorld {
 			block.size > 0 &&
 			Number.isInteger(block.origin.x) &&
 			Number.isInteger(block.origin.y) &&
-			Number.isInteger(block.origin.z)
+			Number.isInteger(block.origin.z) &&
+			(block.propInstanceId === null ||
+				(Number.isInteger(block.propInstanceId) && block.propInstanceId > 0))
+		);
+	}
+
+	private isValidPropInstanceDefinition(propInstance: SerializedWorldPropInstance): boolean {
+		return (
+			Number.isInteger(propInstance.id) &&
+			propInstance.id > 0 &&
+			Number.isInteger(propInstance.propId) &&
+			propInstance.propId > 0 &&
+			Number.isInteger(propInstance.origin.x) &&
+			Number.isInteger(propInstance.origin.y) &&
+			Number.isInteger(propInstance.origin.z) &&
+			Number.isInteger(propInstance.rotationQuarterTurns.x) &&
+			Number.isInteger(propInstance.rotationQuarterTurns.y) &&
+			Number.isInteger(propInstance.rotationQuarterTurns.z)
 		);
 	}
 }

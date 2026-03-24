@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 
-import { DEFAULT_VOXEL_SIZE, VOXEL_AIR } from '$lib/voxel/constants';
+import { DEFAULT_VOXEL_SIZE } from '$lib/voxel/constants';
+import { isSolidVoxelMaterial } from '$lib/voxel/voxelPalette';
 import type { VoxelWorld } from '$lib/voxel/world';
 
 export interface PlayerCollider {
@@ -46,7 +47,7 @@ export function intersectsSolid(
 	for (let vz = minVoxelZ; vz <= maxVoxelZ; vz += 1) {
 		for (let vy = minVoxelY; vy <= maxVoxelY; vy += 1) {
 			for (let vx = minVoxelX; vx <= maxVoxelX; vx += 1) {
-				if (world.getVoxel(vx, vy, vz) !== VOXEL_AIR) {
+				if (isSolidVoxelMaterial(world.getVoxel(vx, vy, vz))) {
 					return true;
 				}
 			}
@@ -176,7 +177,7 @@ function getSolidOverlaps(
 	for (let vz = minVoxelZ; vz <= maxVoxelZ; vz += 1) {
 		for (let vy = minVoxelY; vy <= maxVoxelY; vy += 1) {
 			for (let vx = minVoxelX; vx <= maxVoxelX; vx += 1) {
-				if (world.getVoxel(vx, vy, vz) !== VOXEL_AIR) {
+				if (isSolidVoxelMaterial(world.getVoxel(vx, vy, vz))) {
 					overlaps.push({ x: vx, y: vy, z: vz });
 				}
 			}

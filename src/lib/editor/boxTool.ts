@@ -2,6 +2,7 @@ import { getInteractionBoxToolMode } from '$lib/editor/editorState';
 import type { EditorTool, EditorToolContext } from '$lib/editor/editorTool';
 import { createPreviewBox, getToolTargetCoord } from '$lib/editor/editorTargets';
 import { paintRegion } from '$lib/editor/paintTool';
+import { isSelectableVoxelMaterial } from '$lib/voxel/voxelPalette';
 import { carveBoxCommand, fillBoxCommand, hollowBoxCommand } from '$lib/voxel/voxelCommands';
 import type { VoxelHit } from '$lib/voxel/voxelRaycast';
 import type { WorldBox } from '$lib/voxel/voxelTypes';
@@ -65,6 +66,11 @@ export class BoxTool implements EditorTool {
 
 		switch (boxMode) {
 			case 'solid':
+				if (!isSelectableVoxelMaterial(context.editorState.selectedVoxelId)) {
+					this.reset(context);
+					return;
+				}
+
 				result = fillBoxCommand(
 					context.world,
 					box.min,
@@ -74,6 +80,11 @@ export class BoxTool implements EditorTool {
 				);
 				break;
 			case 'hollow':
+				if (!isSelectableVoxelMaterial(context.editorState.selectedVoxelId)) {
+					this.reset(context);
+					return;
+				}
+
 				result = hollowBoxCommand(
 					context.world,
 					box.min,
@@ -86,6 +97,11 @@ export class BoxTool implements EditorTool {
 				result = carveBoxCommand(context.world, box.min, box.max);
 				break;
 			case 'paint':
+				if (!isSelectableVoxelMaterial(context.editorState.selectedVoxelId)) {
+					this.reset(context);
+					return;
+				}
+
 				result = paintRegion(context.world, box.min, box.max, context.editorState.selectedVoxelId);
 				break;
 		}
