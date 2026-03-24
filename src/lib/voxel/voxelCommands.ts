@@ -1,5 +1,12 @@
 import { VOXEL_AIR } from '$lib/voxel/constants';
-import type { ChunkKey, VoxelId, WorldBox, WorldCoord } from '$lib/voxel/voxelTypes';
+import type {
+	ChunkKey,
+	VoxelBlock,
+	VoxelBlockId,
+	VoxelId,
+	WorldBox,
+	WorldCoord
+} from '$lib/voxel/voxelTypes';
 import type { VoxelWorld } from '$lib/voxel/world';
 
 export interface VoxelCommandResult {
@@ -50,10 +57,11 @@ export function setVoxelCommand(
 	x: number,
 	y: number,
 	z: number,
-	voxelId: VoxelId
+	voxelId: VoxelId,
+	size = 1
 ): VoxelCommandResult {
 	const result = createVoxelCommandResult();
-	applyVoxelWrite(world, x, y, z, voxelId, result);
+	applyBlockWrite(world, { x, y, z }, size, voxelId, result);
 	return result;
 }
 
@@ -66,7 +74,7 @@ export function paintVoxelCommand(
 	options: PaintCommandOptions = {}
 ): VoxelCommandResult {
 	const result = createVoxelCommandResult();
-	applyVoxelPaint(world, x, y, z, voxelId, result, options);
+	applyBlockPaint(world, x, y, z, voxelId, result, options);
 	return result;
 }
 
@@ -74,10 +82,11 @@ export function fillBoxCommand(
 	world: VoxelWorld,
 	min: WorldCoord,
 	max: WorldCoord,
-	voxelId: VoxelId
+	voxelId: VoxelId,
+	size = 1
 ): VoxelCommandResult {
-	return applyBox(world, min, max, (x, y, z, result) => {
-		applyVoxelWrite(world, x, y, z, voxelId, result);
+	return applyBox(world, min, max, size, (x, y, z, result) => {
+		applyBlockWrite(world, { x, y, z }, size, voxelId, result);
 	});
 }
 
@@ -85,19 +94,23 @@ export function hollowBoxCommand(
 	world: VoxelWorld,
 	min: WorldCoord,
 	max: WorldCoord,
-	voxelId: VoxelId
+	voxelId: VoxelId,
+	size = 1
 ): VoxelCommandResult {
-	return applyBox(world, min, max, (x, y, z, result, bounds) => {
+	return applyBox(world, min, max, size, (x, y, z, result, bounds) => {
+		const blockMaxX = x + size - 1;
+		const blockMaxY = y + size - 1;
+		const blockMaxZ = z + size - 1;
 		const isBoundary =
 			x === bounds.min.x ||
-			x === bounds.max.x ||
+			blockMaxX >= bounds.max.x ||
 			y === bounds.min.y ||
-			y === bounds.max.y ||
+			blockMaxY >= bounds.max.y ||
 			z === bounds.min.z ||
-			z === bounds.max.z;
+			blockMaxZ >= bounds.max.z;
 
 		if (isBoundary) {
-			applyVoxelWrite(world, x, y, z, voxelId, result);
+			applyBlockWrite(world, { x, y, z }, size, voxelId, result);
 		}
 	});
 }
@@ -107,9 +120,15 @@ export function carveBoxCommand(
 	min: WorldCoord,
 	max: WorldCoord
 ): VoxelCommandResult {
-	return applyBox(world, min, max, (x, y, z, result) => {
-		applyVoxelWrite(world, x, y, z, VOXEL_AIR, result);
-	});
+	const result = createVoxelCommandResult();
+	const bounds = normalizeWorldBox(min, max);
+	const targetedBlockIds = collectBlockIdsInBox(world, bounds);
+
+	for (const blockId of targetedBlockIds) {
+		applyBlockRemoveById(world, blockId, result);
+	}
+
+	return result;
 }
 
 export function paintBoxCommand(
@@ -119,9 +138,14 @@ export function paintBoxCommand(
 	voxelId: VoxelId,
 	options: PaintCommandOptions = {}
 ): VoxelCommandResult {
-	return applyBox(world, min, max, (x, y, z, result) => {
-		applyVoxelPaint(world, x, y, z, voxelId, result, options);
-	});
+	const result = createVoxelCommandResult();
+	const bounds = normalizeWorldBox(min, max);
+
+	for (const blockId of collectBlockIdsInBox(world, bounds)) {
+		applyBlockPaintById(world, blockId, voxelId, result, options);
+	}
+
+	return result;
 }
 
 type BoxVisitor = (
@@ -136,14 +160,23 @@ function applyBox(
 	world: VoxelWorld,
 	min: WorldCoord,
 	max: WorldCoord,
+	step: number,
 	visitor: BoxVisitor
 ): VoxelCommandResult {
 	const bounds = normalizeWorldBox(min, max);
 	const result = createVoxelCommandResult();
 
-	for (let z = bounds.min.z; z <= bounds.max.z; z += 1) {
-		for (let y = bounds.min.y; y <= bounds.max.y; y += 1) {
-			for (let x = bounds.min.x; x <= bounds.max.x; x += 1) {
+	for (let z = bounds.min.z; z <= bounds.max.z; z += step) {
+		for (let y = bounds.min.y; y <= bounds.max.y; y += step) {
+			for (let x = bounds.min.x; x <= bounds.max.x; x += step) {
+				if (
+					x + step - 1 > bounds.max.x ||
+					y + step - 1 > bounds.max.y ||
+					z + step - 1 > bounds.max.z
+				) {
+					continue;
+				}
+
 				visitor(x, y, z, result, bounds);
 			}
 		}
@@ -152,23 +185,58 @@ function applyBox(
 	return result;
 }
 
-function applyVoxelWrite(
+function applyBlockWrite(
+	world: VoxelWorld,
+	origin: WorldCoord,
+	size: number,
+	voxelId: VoxelId,
+	result: VoxelCommandResult
+): void {
+	if (voxelId === VOXEL_AIR) {
+		applyBlockRemove(world, origin.x, origin.y, origin.z, result);
+		return;
+	}
+
+	const block = world.placeBlock(origin, size, voxelId);
+
+	if (!block) {
+		return;
+	}
+
+	recordChangedBlock(world, block, result);
+}
+
+function applyBlockRemove(
 	world: VoxelWorld,
 	x: number,
 	y: number,
 	z: number,
-	voxelId: VoxelId,
 	result: VoxelCommandResult
 ): void {
-	if (!world.setVoxel(x, y, z, voxelId)) {
+	const block = world.removeBlockAt(x, y, z);
+
+	if (!block) {
 		return;
 	}
 
-	world.collectAffectedChunkKeysForVoxel(x, y, z, result.affectedChunkKeys);
-	result.changedVoxelCount += 1;
+	recordChangedBlock(world, block, result);
 }
 
-function applyVoxelPaint(
+function applyBlockRemoveById(
+	world: VoxelWorld,
+	blockId: VoxelBlockId,
+	result: VoxelCommandResult
+): void {
+	const block = world.removeBlockById(blockId);
+
+	if (!block) {
+		return;
+	}
+
+	recordChangedBlock(world, block, result);
+}
+
+function applyBlockPaint(
 	world: VoxelWorld,
 	x: number,
 	y: number,
@@ -187,5 +255,73 @@ function applyVoxelPaint(
 		return;
 	}
 
-	applyVoxelWrite(world, x, y, z, voxelId, result);
+	applyBlockPaintById(world, world.getBlockIdAt(x, y, z), voxelId, result, options);
+}
+
+function applyBlockPaintById(
+	world: VoxelWorld,
+	blockId: VoxelBlockId,
+	voxelId: VoxelId,
+	result: VoxelCommandResult,
+	options: PaintCommandOptions
+): void {
+	if (blockId === 0) {
+		return;
+	}
+
+	if (voxelId === VOXEL_AIR && !options.allowAirWrite) {
+		return;
+	}
+
+	const block =
+		voxelId === VOXEL_AIR
+			? world.removeBlockById(blockId)
+			: paintOrReplaceBlock(world, blockId, voxelId);
+
+	if (!block) {
+		return;
+	}
+
+	recordChangedBlock(world, block, result);
+}
+
+function paintOrReplaceBlock(
+	world: VoxelWorld,
+	blockId: VoxelBlockId,
+	voxelId: VoxelId
+): VoxelBlock | null {
+	const block = world.blocks.get(blockId);
+
+	if (!block) {
+		return null;
+	}
+
+	return world.paintBlockAt(block.origin.x, block.origin.y, block.origin.z, voxelId);
+}
+
+function recordChangedBlock(
+	world: VoxelWorld,
+	block: Pick<VoxelBlock, 'origin' | 'size'>,
+	result: VoxelCommandResult
+): void {
+	world.collectAffectedChunkKeysForBlock(block.origin, block.size, result.affectedChunkKeys);
+	result.changedVoxelCount += block.size ** 3;
+}
+
+function collectBlockIdsInBox(world: VoxelWorld, bounds: WorldBox): Set<VoxelBlockId> {
+	const blockIds = new Set<VoxelBlockId>();
+
+	for (let z = bounds.min.z; z <= bounds.max.z; z += 1) {
+		for (let y = bounds.min.y; y <= bounds.max.y; y += 1) {
+			for (let x = bounds.min.x; x <= bounds.max.x; x += 1) {
+				const blockId = world.getBlockIdAt(x, y, z);
+
+				if (blockId !== 0) {
+					blockIds.add(blockId);
+				}
+			}
+		}
+	}
+
+	return blockIds;
 }

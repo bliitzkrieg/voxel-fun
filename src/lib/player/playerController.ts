@@ -6,18 +6,19 @@ import {
 	resolvePlayerMovement,
 	type PlayerCollider
 } from '$lib/player/playerPhysics';
+import { DEFAULT_VOXEL_SIZE, VOXEL_WORLD_SIZE } from '$lib/voxel/constants';
 import type { WorldCoord } from '$lib/voxel/voxelTypes';
 import type { VoxelWorld } from '$lib/voxel/world';
 
 const LOOK_SENSITIVITY = 0.0025;
-const WALK_SPEED = 14.2805;
-const SPRINT_SPEED = 20.32225;
-const JUMP_VELOCITY = 18.5;
-const GRAVITY = 40;
+const WALK_SPEED = 14.2805 * DEFAULT_VOXEL_SIZE;
+const SPRINT_SPEED = 20.32225 * DEFAULT_VOXEL_SIZE;
+const JUMP_VELOCITY = 18.5 * DEFAULT_VOXEL_SIZE;
+const GRAVITY = 40 * DEFAULT_VOXEL_SIZE;
 
-const PLAYER_WIDTH = 2.5;
-const PLAYER_HEIGHT = 7;
-const PLAYER_EYE_HEIGHT = 6.2;
+const PLAYER_WIDTH = 2.5 * DEFAULT_VOXEL_SIZE;
+const PLAYER_HEIGHT = 7 * DEFAULT_VOXEL_SIZE;
+const PLAYER_EYE_HEIGHT = 6.2 * DEFAULT_VOXEL_SIZE;
 
 export class PlayerController {
 	position = new THREE.Vector3();
@@ -89,10 +90,7 @@ export class PlayerController {
 			const moveZ =
 				this.rightVector.z * this.moveVector.x + this.forwardVector.z * this.moveVector.z;
 			const moveLength = Math.hypot(moveX, moveZ) || 1;
-			const moveSpeed =
-				this.input.isKeyDown('ShiftLeft') || this.input.isKeyDown('ShiftRight')
-					? SPRINT_SPEED
-					: WALK_SPEED;
+			const moveSpeed = this.input.isShiftDown() ? SPRINT_SPEED : WALK_SPEED;
 
 			this.velocity.x = (moveX / moveLength) * moveSpeed;
 			this.velocity.z = (moveZ / moveLength) * moveSpeed;
@@ -123,15 +121,19 @@ export class PlayerController {
 	}
 
 	canPlaceVoxelAt(targetX: number, targetY: number, targetZ: number): boolean {
+		return this.canPlaceBlockAt({ x: targetX, y: targetY, z: targetZ }, 1);
+	}
+
+	canPlaceBlockAt(origin: WorldCoord, size: number): boolean {
 		getPlayerBounds(this.position, this.collider, this.boundsMin, this.boundsMax);
 
 		return !(
-			targetX < this.boundsMax.x &&
-			targetX + 1 > this.boundsMin.x &&
-			targetY < this.boundsMax.y &&
-			targetY + 1 > this.boundsMin.y &&
-			targetZ < this.boundsMax.z &&
-			targetZ + 1 > this.boundsMin.z
+			origin.x < this.boundsMax.x &&
+			origin.x + size > this.boundsMin.x &&
+			origin.y < this.boundsMax.y &&
+			origin.y + size > this.boundsMin.y &&
+			origin.z < this.boundsMax.z &&
+			origin.z + size > this.boundsMin.z
 		);
 	}
 
@@ -143,7 +145,11 @@ export class PlayerController {
 		this.camera.rotation.order = 'YXZ';
 		this.camera.rotation.y = this.yaw;
 		this.camera.rotation.x = this.pitch;
-		this.camera.position.set(this.position.x, this.position.y + this.eyeHeight, this.position.z);
+		this.camera.position.set(
+			this.position.x * VOXEL_WORLD_SIZE,
+			(this.position.y + this.eyeHeight) * VOXEL_WORLD_SIZE,
+			this.position.z * VOXEL_WORLD_SIZE
+		);
 		this.camera.updateMatrixWorld();
 	}
 }

@@ -1,5 +1,6 @@
 import type { VoxelHit } from '$lib/voxel/voxelRaycast';
 import type { WorldBox, WorldCoord } from '$lib/voxel/voxelTypes';
+import { DEFAULT_VOXEL_SIZE } from '$lib/voxel/constants';
 import { DEFAULT_SELECTED_VOXEL_ID } from '$lib/voxel/voxelPalette';
 
 export type EditorToolType =
@@ -12,7 +13,6 @@ export type EditorToolType =
 	| 'box-paint';
 
 export type EditorMode = 'add' | 'remove' | 'paint';
-export type BoxConstraint = 'free' | 'horizontal' | 'vertical-x' | 'vertical-z';
 export type BoxToolMode = 'solid' | 'hollow' | 'carve' | 'paint';
 export type DragMode = 'single' | 'region';
 
@@ -20,10 +20,10 @@ export interface EditorState {
 	enabled: boolean;
 	activeTool: EditorToolType;
 	selectedVoxelId: number;
+	selectedVoxelSize: number;
 	dragStart: WorldCoord | null;
 	hoverHit: VoxelHit | null;
 	mode: EditorMode;
-	boxConstraint: BoxConstraint;
 	previewBox: WorldBox | null;
 	dragMode: DragMode;
 }
@@ -33,10 +33,10 @@ export function createEditorState(): EditorState {
 		enabled: false,
 		activeTool: 'brush-add',
 		selectedVoxelId: DEFAULT_SELECTED_VOXEL_ID,
+		selectedVoxelSize: DEFAULT_VOXEL_SIZE,
 		dragStart: null,
 		hoverHit: null,
 		mode: 'add',
-		boxConstraint: 'free',
 		previewBox: null,
 		dragMode: 'single'
 	};
@@ -121,18 +121,5 @@ export function getEditorToolLabel(tool: EditorToolType): string {
 			return 'Box Carve';
 		case 'box-paint':
 			return 'Box Paint';
-	}
-}
-
-export function getBoxConstraintLabel(constraint: BoxConstraint): string {
-	switch (constraint) {
-		case 'horizontal':
-			return 'Horizontal';
-		case 'vertical-x':
-			return 'Wall X';
-		case 'vertical-z':
-			return 'Wall Z';
-		default:
-			return 'Free 3D';
 	}
 }

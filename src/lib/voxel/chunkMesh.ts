@@ -11,6 +11,8 @@ export class ChunkMesh {
 	constructor(chunk: VoxelChunk, material: THREE.Material) {
 		this.chunk = chunk;
 		this.mesh = new THREE.Mesh(new THREE.BufferGeometry(), material);
+		this.mesh.castShadow = true;
+		this.mesh.receiveShadow = true;
 		this.mesh.position.set(
 			chunk.coord.x * CHUNK_SIZE,
 			chunk.coord.y * CHUNK_SIZE,

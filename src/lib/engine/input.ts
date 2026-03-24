@@ -6,6 +6,7 @@ export class InputState {
 	private readonly pressedButtons = new Set<number>();
 	private readonly releasedButtons = new Set<number>();
 	private pointerLocked = false;
+	private shiftDown = false;
 	private mouseDx = 0;
 	private mouseDy = 0;
 	private wheelSteps = 0;
@@ -27,6 +28,10 @@ export class InputState {
 
 	isKeyDown(code: string): boolean {
 		return this.keys.has(code);
+	}
+
+	isShiftDown(): boolean {
+		return this.shiftDown;
 	}
 
 	consumeKeyPress(code: string): boolean {
@@ -99,7 +104,11 @@ export class InputState {
 	}
 
 	private handleKeyDown = (event: KeyboardEvent): void => {
-		if (event.code === 'Tab' || (this.pointerLocked && event.code === 'Space')) {
+		if (
+			event.code === 'Tab' ||
+			(this.pointerLocked && event.code === 'Space') ||
+			((event.ctrlKey || event.metaKey) && event.code === 'KeyZ')
+		) {
 			event.preventDefault();
 		}
 
@@ -108,13 +117,17 @@ export class InputState {
 		}
 
 		this.keys.add(event.code);
+		this.shiftDown = event.shiftKey || event.code === 'ShiftLeft' || event.code === 'ShiftRight';
 	};
 
 	private handleKeyUp = (event: KeyboardEvent): void => {
 		this.keys.delete(event.code);
+		this.shiftDown = event.shiftKey;
 	};
 
 	private handleMouseMove = (event: MouseEvent): void => {
+		this.shiftDown = event.shiftKey;
+
 		if (!this.pointerLocked) {
 			return;
 		}
@@ -125,6 +138,7 @@ export class InputState {
 
 	private handleMouseDown = (event: MouseEvent): void => {
 		event.preventDefault();
+		this.shiftDown = event.shiftKey;
 
 		if (!this.pointerLocked) {
 			this.requestPointerLock();
@@ -136,6 +150,7 @@ export class InputState {
 	};
 
 	private handleMouseUp = (event: MouseEvent): void => {
+		this.shiftDown = event.shiftKey;
 		this.buttons.delete(event.button);
 		this.releasedButtons.add(event.button);
 	};
@@ -145,6 +160,8 @@ export class InputState {
 	};
 
 	private handleWheel = (event: WheelEvent): void => {
+		this.shiftDown = event.shiftKey;
+
 		if (!this.pointerLocked) {
 			return;
 		}
@@ -162,6 +179,7 @@ export class InputState {
 			this.buttons.clear();
 			this.pressedButtons.clear();
 			this.releasedButtons.clear();
+			this.shiftDown = false;
 		}
 	};
 
@@ -171,6 +189,7 @@ export class InputState {
 		this.buttons.clear();
 		this.pressedButtons.clear();
 		this.releasedButtons.clear();
+		this.shiftDown = false;
 		this.mouseDx = 0;
 		this.mouseDy = 0;
 		this.wheelSteps = 0;

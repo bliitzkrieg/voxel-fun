@@ -44,7 +44,7 @@ export class BrushTool implements EditorTool {
 		}
 
 		const materialId = context.editorState.selectedVoxelId;
-		const strokeKey = `${context.editorState.activeTool}:${materialId}:${worldCoordToKey(target)}`;
+		const strokeKey = `${context.editorState.activeTool}:${materialId}:${context.editorState.selectedVoxelSize}:${worldCoordToKey(target)}`;
 
 		if (strokeKey === this.lastAppliedKey) {
 			return;
@@ -54,11 +54,18 @@ export class BrushTool implements EditorTool {
 
 		switch (context.editorState.activeTool) {
 			case 'brush-add':
-				if (!context.player.canPlaceVoxelAt(target.x, target.y, target.z)) {
+				if (!context.player.canPlaceBlockAt(target, context.editorState.selectedVoxelSize)) {
 					return;
 				}
 
-				result = setVoxelCommand(context.world, target.x, target.y, target.z, materialId);
+				result = setVoxelCommand(
+					context.world,
+					target.x,
+					target.y,
+					target.z,
+					materialId,
+					context.editorState.selectedVoxelSize
+				);
 				break;
 			case 'brush-remove':
 				result = setVoxelCommand(context.world, target.x, target.y, target.z, VOXEL_AIR);
@@ -78,7 +85,11 @@ export class BrushTool implements EditorTool {
 	}
 
 	private getStrokeTarget(context: EditorToolContext, hit: VoxelHit | null): WorldCoord | null {
-		const target = getToolTargetCoord(context.editorState.activeTool, hit);
+		const target = getToolTargetCoord(
+			context.editorState.activeTool,
+			hit,
+			context.editorState.selectedVoxelSize
+		);
 
 		if (!target || !this.strokePlane) {
 			return target;
@@ -95,7 +106,11 @@ export class BrushTool implements EditorTool {
 			return null;
 		}
 
-		const target = getToolTargetCoord(context.editorState.activeTool, hit);
+		const target = getToolTargetCoord(
+			context.editorState.activeTool,
+			hit,
+			context.editorState.selectedVoxelSize
+		);
 
 		if (!target) {
 			return null;

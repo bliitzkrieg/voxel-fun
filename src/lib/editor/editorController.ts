@@ -11,20 +11,22 @@ import {
 import { BoxTool } from '$lib/editor/boxTool';
 import { BrushTool } from '$lib/editor/brushTool';
 import type { EditorTool, EditorToolContext } from '$lib/editor/editorTool';
-import { getToolTargetCoord } from '$lib/editor/editorTargets';
+import { createPreviewBox, getToolTargetCoord } from '$lib/editor/editorTargets';
 import { InputState } from '$lib/engine/input';
 import { PlayerController } from '$lib/player/playerController';
-import { cycleVoxelMaterialId } from '$lib/voxel/voxelPalette';
+import { DEFAULT_VOXEL_SIZE, VOXEL_SIZE_PRESETS, VOXEL_WORLD_SIZE } from '$lib/voxel/constants';
+import { getVoxelPaletteEntry } from '$lib/voxel/voxelPalette';
 import type { ChunkCoord, ChunkKey, WorldBox, WorldCoord } from '$lib/voxel/voxelTypes';
 import { raycastVoxel } from '$lib/voxel/voxelRaycast';
 import type { VoxelCommandResult } from '$lib/voxel/voxelCommands';
 import type { VoxelWorld } from '$lib/voxel/world';
 
-const MAX_EDIT_DISTANCE = 14;
-const HOVER_COLOR = new THREE.Color('#ffc857');
+const MAX_EDIT_DISTANCE = 14 * DEFAULT_VOXEL_SIZE;
+const MAX_UNDO_ENTRIES = 64;
 const ADD_COLOR = new THREE.Color('#44d17a');
 const REMOVE_COLOR = new THREE.Color('#ff6b57');
 const PAINT_COLOR = new THREE.Color('#4dc9ff');
+type WorldSnapshot = ReturnType<VoxelWorld['getBlocks']>;
 
 export class EditorController {
 	readonly state: EditorState = createEditorState();
@@ -32,10 +34,14 @@ export class EditorController {
 	private readonly boxTool = new BoxTool();
 	private readonly brushTool = new BrushTool();
 	private readonly rayDirection = new THREE.Vector3();
+	private readonly interactionCameraPosition = new THREE.Vector3();
+	private readonly interactionRayDirection = new THREE.Vector3();
 	private readonly pendingChunkKeys = new Set<ChunkKey>();
 	private activeInteractionTool: EditorTool | null = null;
+	private readonly undoStack: WorldSnapshot[] = [];
+	private pendingUndoSnapshot: WorldSnapshot | null = null;
+	private hasCommittedPendingUndo = false;
 
-	private readonly hoverHighlight: THREE.LineSegments;
 	private readonly targetHighlight: THREE.LineSegments;
 	private readonly boxPreviewWireframe: THREE.LineSegments;
 	private readonly boxPreviewGhost: THREE.Mesh;
@@ -44,20 +50,15 @@ export class EditorController {
 		private readonly world: VoxelWorld,
 		private readonly camera: THREE.PerspectiveCamera,
 		private readonly input: InputState,
-		private readonly scene: THREE.Scene,
-		private readonly player: PlayerController
+		private readonly scene: THREE.Object3D,
+		private readonly player: PlayerController,
+		private readonly applyWorldSnapshot: (blocks: WorldSnapshot) => boolean
 	) {
-		this.hoverHighlight = createWireCube(HOVER_COLOR, 0.95);
 		this.targetHighlight = createWireCube(ADD_COLOR, 0.9);
 		this.boxPreviewWireframe = createWireCube(ADD_COLOR, 0.95);
 		this.boxPreviewGhost = createGhostCube(ADD_COLOR, 0.14);
 
-		this.scene.add(
-			this.hoverHighlight,
-			this.targetHighlight,
-			this.boxPreviewWireframe,
-			this.boxPreviewGhost
-		);
+		this.scene.add(this.targetHighlight, this.boxPreviewWireframe, this.boxPreviewGhost);
 	}
 
 	update(): Set<ChunkKey> {
@@ -73,6 +74,7 @@ export class EditorController {
 
 		this.handleHotkeys();
 		this.updateHoverHit();
+		this.handleSampleInput();
 		this.handleToolInput();
 		this.updatePreviewState();
 
@@ -80,7 +82,11 @@ export class EditorController {
 	}
 
 	getPlacementTarget(): WorldCoord | null {
-		return getToolTargetCoord(this.state.activeTool, this.state.hoverHit);
+		return getToolTargetCoord(
+			this.state.activeTool,
+			this.state.hoverHit,
+			this.state.selectedVoxelSize
+		);
 	}
 
 	getHoveredChunkCoord(): ChunkCoord | null {
@@ -94,16 +100,16 @@ export class EditorController {
 	}
 
 	dispose(): void {
-		this.scene.remove(
-			this.hoverHighlight,
-			this.targetHighlight,
-			this.boxPreviewWireframe,
-			this.boxPreviewGhost
-		);
-		disposePreviewObject(this.hoverHighlight);
+		this.scene.remove(this.targetHighlight, this.boxPreviewWireframe, this.boxPreviewGhost);
 		disposePreviewObject(this.targetHighlight);
 		disposePreviewObject(this.boxPreviewWireframe);
 		disposePreviewObject(this.boxPreviewGhost);
+	}
+
+	resetTransientState(): void {
+		this.clearInteraction();
+		this.state.hoverHit = null;
+		this.updatePreviewState();
 	}
 
 	private handleModeToggle(): void {
@@ -117,6 +123,11 @@ export class EditorController {
 	}
 
 	private handleHotkeys(): void {
+		if (this.consumeUndoHotkey()) {
+			this.undoLastEdit();
+			return;
+		}
+
 		if (this.input.isButtonDown(0)) {
 			return;
 		}
@@ -130,10 +141,7 @@ export class EditorController {
 		}
 
 		if (this.input.consumeKeyPress('KeyR')) {
-			const paintTool =
-				this.input.isKeyDown('ShiftLeft') || this.input.isKeyDown('ShiftRight')
-					? 'box-paint'
-					: 'brush-paint';
+			const paintTool = this.input.isShiftDown() ? 'box-paint' : 'brush-paint';
 			setActiveEditorTool(this.state, paintTool);
 		}
 
@@ -149,34 +157,20 @@ export class EditorController {
 			setActiveEditorTool(this.state, 'box-carve');
 		}
 
-		if (this.input.consumeKeyPress('Digit1')) {
-			this.state.boxConstraint = 'free';
-		}
-
-		if (this.input.consumeKeyPress('Digit2')) {
-			this.state.boxConstraint = 'horizontal';
-		}
-
-		if (this.input.consumeKeyPress('Digit3')) {
-			this.state.boxConstraint = 'vertical-x';
-		}
-
-		if (this.input.consumeKeyPress('Digit4')) {
-			this.state.boxConstraint = 'vertical-z';
-		}
-
-		if (this.input.consumeKeyPress('BracketLeft')) {
-			this.shiftSelectedMaterial(-1);
-		}
-
-		if (this.input.consumeKeyPress('BracketRight')) {
-			this.shiftSelectedMaterial(1);
-		}
+		this.handleMaterialHotkeys();
 
 		const wheelSteps = this.input.consumeWheelSteps();
 
 		if (wheelSteps !== 0) {
-			this.shiftSelectedMaterial(wheelSteps);
+			this.shiftSelectedSize(-wheelSteps);
+		}
+
+		if (this.input.consumeKeyPress('Minus')) {
+			this.shiftSelectedSize(-1);
+		}
+
+		if (this.input.consumeKeyPress('Equal')) {
+			this.shiftSelectedSize(1);
 		}
 
 		this.state.mode = getEditorModeForTool(this.state.activeTool);
@@ -184,54 +178,64 @@ export class EditorController {
 
 	private updateHoverHit(): void {
 		this.camera.getWorldDirection(this.rayDirection);
-		this.state.hoverHit = raycastVoxel(
-			this.world,
-			this.camera.position,
-			this.rayDirection,
-			MAX_EDIT_DISTANCE
-		);
+		const origin = this.camera.position.clone().divideScalar(VOXEL_WORLD_SIZE);
+		this.state.hoverHit = raycastVoxel(this.world, origin, this.rayDirection, MAX_EDIT_DISTANCE);
+	}
+
+	private handleSampleInput(): void {
+		if (!this.input.consumeButtonPress(1) || !this.state.hoverHit) {
+			return;
+		}
+
+		this.state.selectedVoxelId = this.state.hoverHit.block.materialId;
+		this.state.selectedVoxelSize = this.state.hoverHit.block.size;
 	}
 
 	private handleToolInput(): void {
 		if (this.input.consumeButtonPress(0)) {
+			this.clearInteraction();
+			this.captureUndoSnapshot();
 			this.state.dragMode = this.shouldUseRegionDrag() ? 'region' : 'single';
 			const tool = this.resolveActiveTool();
 			const context = this.createToolContext();
 			this.activeInteractionTool = tool;
 			this.activeInteractionTool.begin(context, this.state.hoverHit);
+			this.captureInteractionPose();
 		}
 
-		if (this.activeInteractionTool && this.input.isButtonDown(0)) {
-			this.promoteInteractionToRegion();
-			const context = this.createToolContext();
-			this.activeInteractionTool.update(context, this.state.hoverHit);
+		if (!this.activeInteractionTool) {
+			return;
 		}
 
-		if (this.activeInteractionTool && this.input.consumeButtonRelease(0)) {
-			const context = this.createToolContext();
-			this.activeInteractionTool.end(context);
-			this.activeInteractionTool = null;
-			this.state.dragMode = 'single';
+		if (!this.input.isButtonDown(0)) {
+			if (this.input.consumeButtonRelease(0)) {
+				const context = this.createToolContext();
+				this.activeInteractionTool.end(context);
+			}
+
+			this.clearInteraction();
+			return;
 		}
+
+		if (this.activeInteractionTool === this.brushTool && !this.hasInteractionPoseChanged()) {
+			return;
+		}
+
+		const context = this.createToolContext();
+		this.activeInteractionTool.update(context, this.state.hoverHit);
+		this.captureInteractionPose();
 	}
 
 	private updatePreviewState(): void {
-		const hitCoord = this.state.hoverHit?.voxel ?? null;
-		const placementTarget = this.state.enabled ? this.getPlacementTarget() : null;
+		const placementBox = this.state.enabled ? this.getPlacementTargetBox() : null;
 		const showBoxPreview = this.state.enabled && !!this.state.previewBox;
 
-		this.hoverHighlight.visible = this.state.enabled && hitCoord !== null;
-		this.targetHighlight.visible = this.state.enabled && placementTarget !== null;
+		this.targetHighlight.visible = this.state.enabled && placementBox !== null;
 		this.boxPreviewWireframe.visible = showBoxPreview;
 		this.boxPreviewGhost.visible = showBoxPreview;
 
-		if (hitCoord) {
-			positionVoxelPreview(this.hoverHighlight, hitCoord);
-			setPreviewColor(this.hoverHighlight, HOVER_COLOR);
-		}
-
-		if (placementTarget) {
-			positionVoxelPreview(this.targetHighlight, placementTarget);
+		if (placementBox) {
+			positionBoxPreview(this.targetHighlight, placementBox, 1.01);
 			setPreviewColor(this.targetHighlight, this.getModeColor());
 		}
 
@@ -255,6 +259,8 @@ export class EditorController {
 			player: this.player,
 			editorState: this.state,
 			commit: (result: VoxelCommandResult) => {
+				this.commitPendingUndoSnapshot();
+
 				for (const chunkKey of result.affectedChunkKeys) {
 					this.pendingChunkKeys.add(chunkKey);
 				}
@@ -262,8 +268,29 @@ export class EditorController {
 		};
 	}
 
-	private shiftSelectedMaterial(step: number): void {
-		this.state.selectedVoxelId = cycleVoxelMaterialId(this.state.selectedVoxelId, step);
+	private shiftSelectedSize(step: number): void {
+		const presetSizes: readonly number[] = VOXEL_SIZE_PRESETS;
+		const currentIndex = presetSizes.indexOf(this.state.selectedVoxelSize);
+		const safeIndex = currentIndex >= 0 ? currentIndex : 0;
+		const nextIndex = Math.max(0, Math.min(VOXEL_SIZE_PRESETS.length - 1, safeIndex + step));
+		this.state.selectedVoxelSize = VOXEL_SIZE_PRESETS[nextIndex] ?? this.state.selectedVoxelSize;
+	}
+
+	private handleMaterialHotkeys(): void {
+		for (let materialId = 1; materialId <= 9; materialId += 1) {
+			if (
+				!this.input.consumeKeyPress(`Digit${materialId}`) &&
+				!this.input.consumeKeyPress(`Numpad${materialId}`)
+			) {
+				continue;
+			}
+
+			if (getVoxelPaletteEntry(materialId)) {
+				this.state.selectedVoxelId = materialId;
+			}
+
+			return;
+		}
 	}
 
 	private consumePendingChunkKeys(): Set<ChunkKey> {
@@ -277,6 +304,20 @@ export class EditorController {
 		this.state.dragStart = null;
 		this.state.previewBox = null;
 		this.state.dragMode = 'single';
+		this.pendingUndoSnapshot = null;
+		this.hasCommittedPendingUndo = false;
+	}
+
+	private captureInteractionPose(): void {
+		this.interactionCameraPosition.copy(this.camera.position);
+		this.interactionRayDirection.copy(this.rayDirection);
+	}
+
+	private hasInteractionPoseChanged(): boolean {
+		return (
+			this.interactionCameraPosition.distanceToSquared(this.camera.position) > 1e-6 ||
+			this.interactionRayDirection.angleTo(this.rayDirection) > 1e-4
+		);
 	}
 
 	private shouldUseRegionDrag(): boolean {
@@ -284,25 +325,7 @@ export class EditorController {
 			return true;
 		}
 
-		return this.input.isKeyDown('ShiftLeft') || this.input.isKeyDown('ShiftRight');
-	}
-
-	private promoteInteractionToRegion(): void {
-		if (this.state.dragMode === 'region' || this.activeInteractionTool !== this.brushTool) {
-			return;
-		}
-
-		if (!this.shouldUseRegionDrag()) {
-			return;
-		}
-
-		if (!getInteractionBoxToolMode(this.state.activeTool, 'region')) {
-			return;
-		}
-
-		this.state.dragMode = 'region';
-		this.activeInteractionTool = this.boxTool;
-		this.activeInteractionTool.begin(this.createToolContext(), this.state.hoverHit);
+		return this.input.isShiftDown();
 	}
 
 	private getModeColor(): THREE.Color {
@@ -313,6 +336,72 @@ export class EditorController {
 				return PAINT_COLOR;
 			default:
 				return ADD_COLOR;
+		}
+	}
+
+	private getPlacementTargetBox(): WorldBox | null {
+		const target = this.getPlacementTarget();
+
+		if (!target) {
+			return null;
+		}
+
+		if (
+			this.state.activeTool === 'brush-add' ||
+			this.state.activeTool === 'box-fill' ||
+			this.state.activeTool === 'box-hollow'
+		) {
+			return createPreviewBox(target, target, this.state.selectedVoxelSize);
+		}
+
+		return this.state.hoverHit?.blockBox ?? createPreviewBox(target, target);
+	}
+
+	private consumeUndoHotkey(): boolean {
+		return this.isUndoModifierDown() && this.input.consumeKeyPress('KeyZ');
+	}
+
+	private isUndoModifierDown(): boolean {
+		return (
+			this.input.isKeyDown('ControlLeft') ||
+			this.input.isKeyDown('ControlRight') ||
+			this.input.isKeyDown('MetaLeft') ||
+			this.input.isKeyDown('MetaRight')
+		);
+	}
+
+	private captureUndoSnapshot(): void {
+		this.pendingUndoSnapshot = cloneWorldSnapshot(this.world.getBlocks());
+		this.hasCommittedPendingUndo = false;
+	}
+
+	private commitPendingUndoSnapshot(): void {
+		if (!this.pendingUndoSnapshot || this.hasCommittedPendingUndo) {
+			return;
+		}
+
+		this.undoStack.push(this.pendingUndoSnapshot);
+
+		if (this.undoStack.length > MAX_UNDO_ENTRIES) {
+			this.undoStack.splice(0, this.undoStack.length - MAX_UNDO_ENTRIES);
+		}
+
+		this.pendingUndoSnapshot = null;
+		this.hasCommittedPendingUndo = true;
+	}
+
+	private undoLastEdit(): void {
+		const snapshot = this.undoStack.pop();
+
+		if (!snapshot) {
+			return;
+		}
+
+		this.clearInteraction();
+		this.pendingChunkKeys.clear();
+
+		if (!this.applyWorldSnapshot(cloneWorldSnapshot(snapshot))) {
+			this.undoStack.push(snapshot);
 		}
 	}
 }
@@ -348,11 +437,6 @@ function createGhostCube(color: THREE.ColorRepresentation, opacity: number): THR
 	mesh.renderOrder = 19;
 
 	return mesh;
-}
-
-function positionVoxelPreview(object: THREE.Object3D, coord: WorldCoord): void {
-	object.position.set(coord.x + 0.5, coord.y + 0.5, coord.z + 0.5);
-	object.scale.setScalar(1.01);
 }
 
 function positionBoxPreview(object: THREE.Object3D, box: WorldBox, scaleOffset: number): void {
@@ -404,4 +488,12 @@ function disposePreviewObject(object: THREE.Object3D): void {
 			mesh.material?.dispose();
 		}
 	});
+}
+
+function cloneWorldSnapshot(blocks: WorldSnapshot): WorldSnapshot {
+	return blocks.map((block) => ({
+		materialId: block.materialId,
+		origin: { ...block.origin },
+		size: block.size
+	}));
 }

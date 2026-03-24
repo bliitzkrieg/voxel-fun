@@ -1,11 +1,14 @@
 import * as THREE from 'three';
 
 import { VOXEL_AIR } from '$lib/voxel/constants';
+import { createVoxelBlockBox, type VoxelBlock, type WorldBox } from '$lib/voxel/voxelTypes';
 import type { VoxelWorld } from '$lib/voxel/world';
 
 export interface VoxelHit {
 	voxel: { x: number; y: number; z: number };
 	normal: { x: number; y: number; z: number };
+	block: VoxelBlock;
+	blockBox: WorldBox;
 	position: THREE.Vector3;
 	distance: number;
 }
@@ -47,9 +50,17 @@ export function raycastVoxel(
 
 	for (let step = 0; step < MAX_DDA_STEPS && distance <= maxDistance; step += 1) {
 		if (world.getVoxel(voxelX, voxelY, voxelZ) !== VOXEL_AIR) {
+			const block = world.getBlockAt(voxelX, voxelY, voxelZ);
+
+			if (!block) {
+				return null;
+			}
+
 			return {
 				voxel: { x: voxelX, y: voxelY, z: voxelZ },
 				normal: hitNormal,
+				block,
+				blockBox: createVoxelBlockBox(block),
 				position: origin.clone().addScaledVector(rayDirection, distance),
 				distance
 			};

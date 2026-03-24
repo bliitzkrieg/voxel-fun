@@ -1,10 +1,6 @@
 import { getInteractionBoxToolMode } from '$lib/editor/editorState';
 import type { EditorTool, EditorToolContext } from '$lib/editor/editorTool';
-import {
-	constrainTargetCoord,
-	createPreviewBox,
-	getToolTargetCoord
-} from '$lib/editor/editorTargets';
+import { createPreviewBox, getToolTargetCoord } from '$lib/editor/editorTargets';
 import { paintRegion } from '$lib/editor/paintTool';
 import { carveBoxCommand, fillBoxCommand, hollowBoxCommand } from '$lib/voxel/voxelCommands';
 import type { VoxelHit } from '$lib/voxel/voxelRaycast';
@@ -14,15 +10,21 @@ export class BoxTool implements EditorTool {
 	private previewBox: WorldBox | null = null;
 
 	begin(context: EditorToolContext, hit: VoxelHit | null): void {
+		const previewSpan = this.getPreviewSpan(context);
 		const start =
-			context.editorState.dragStart ?? getToolTargetCoord(context.editorState.activeTool, hit);
+			context.editorState.dragStart ??
+			getToolTargetCoord(
+				context.editorState.activeTool,
+				hit,
+				context.editorState.selectedVoxelSize
+			);
 
 		if (!start) {
 			return;
 		}
 
 		context.editorState.dragStart = start;
-		this.previewBox = createPreviewBox(start, start);
+		this.previewBox = createPreviewBox(start, start, previewSpan);
 		context.editorState.previewBox = this.previewBox;
 	}
 
@@ -33,19 +35,17 @@ export class BoxTool implements EditorTool {
 			return;
 		}
 
-		const current = getToolTargetCoord(context.editorState.activeTool, hit);
+		const current = getToolTargetCoord(
+			context.editorState.activeTool,
+			hit,
+			context.editorState.selectedVoxelSize
+		);
 
 		if (!current) {
 			return;
 		}
 
-		const constrainedTarget = constrainTargetCoord(
-			dragStart,
-			current,
-			context.editorState.boxConstraint
-		);
-
-		this.previewBox = createPreviewBox(dragStart, constrainedTarget);
+		this.previewBox = createPreviewBox(dragStart, current, this.getPreviewSpan(context));
 		context.editorState.previewBox = this.previewBox;
 	}
 
@@ -69,7 +69,8 @@ export class BoxTool implements EditorTool {
 					context.world,
 					box.min,
 					box.max,
-					context.editorState.selectedVoxelId
+					context.editorState.selectedVoxelId,
+					context.editorState.selectedVoxelSize
 				);
 				break;
 			case 'hollow':
@@ -77,7 +78,8 @@ export class BoxTool implements EditorTool {
 					context.world,
 					box.min,
 					box.max,
-					context.editorState.selectedVoxelId
+					context.editorState.selectedVoxelId,
+					context.editorState.selectedVoxelSize
 				);
 				break;
 			case 'carve':
@@ -99,5 +101,14 @@ export class BoxTool implements EditorTool {
 		context.editorState.dragStart = null;
 		context.editorState.previewBox = null;
 		this.previewBox = null;
+	}
+
+	private getPreviewSpan(context: EditorToolContext): number {
+		const boxMode = getInteractionBoxToolMode(
+			context.editorState.activeTool,
+			context.editorState.dragMode
+		);
+
+		return boxMode === 'solid' || boxMode === 'hollow' ? context.editorState.selectedVoxelSize : 1;
 	}
 }

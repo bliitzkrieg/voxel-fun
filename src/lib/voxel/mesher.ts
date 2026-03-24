@@ -106,7 +106,9 @@ export function buildChunkMesh(world: VoxelWorld, chunk: VoxelChunk): MeshBuffer
 	for (let lz = 0; lz < CHUNK_SIZE; lz += 1) {
 		for (let ly = 0; ly < CHUNK_SIZE; ly += 1) {
 			for (let lx = 0; lx < CHUNK_SIZE; lx += 1) {
-				const voxelId = chunk.getLocal(lx, ly, lz);
+				const blockId = chunk.getLocalBlockId(lx, ly, lz);
+				const voxelId =
+					blockId === 0 ? VOXEL_AIR : (world.blocks.get(blockId)?.materialId ?? VOXEL_AIR);
 
 				if (voxelId === VOXEL_AIR) {
 					continue;

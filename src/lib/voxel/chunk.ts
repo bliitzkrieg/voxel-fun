@@ -1,14 +1,14 @@
-import { CHUNK_SIZE, CHUNK_VOLUME, VOXEL_AIR } from '$lib/voxel/constants';
-import type { ChunkCoord, VoxelId } from '$lib/voxel/voxelTypes';
+import { CHUNK_SIZE, CHUNK_VOLUME } from '$lib/voxel/constants';
+import type { ChunkCoord, VoxelBlockId } from '$lib/voxel/voxelTypes';
 
 export class VoxelChunk {
 	coord: ChunkCoord;
-	voxels: Uint16Array;
+	blockIds: Uint32Array;
 	dirty: boolean;
 
 	constructor(coord: ChunkCoord) {
 		this.coord = { ...coord };
-		this.voxels = new Uint16Array(CHUNK_VOLUME);
+		this.blockIds = new Uint32Array(CHUNK_VOLUME);
 		this.dirty = true;
 	}
 
@@ -20,31 +20,26 @@ export class VoxelChunk {
 		return x >= 0 && x < CHUNK_SIZE && y >= 0 && y < CHUNK_SIZE && z >= 0 && z < CHUNK_SIZE;
 	}
 
-	getLocal(x: number, y: number, z: number): VoxelId {
+	getLocalBlockId(x: number, y: number, z: number): VoxelBlockId {
 		if (!this.inBounds(x, y, z)) {
-			return VOXEL_AIR;
+			return 0;
 		}
 
-		return this.voxels[this.index(x, y, z)] ?? VOXEL_AIR;
+		return this.blockIds[this.index(x, y, z)] ?? 0;
 	}
 
-	setLocal(x: number, y: number, z: number, id: VoxelId): void {
+	setLocalBlockId(x: number, y: number, z: number, blockId: VoxelBlockId): void {
 		if (!this.inBounds(x, y, z)) {
 			return;
 		}
 
 		const voxelIndex = this.index(x, y, z);
 
-		if (this.voxels[voxelIndex] === id) {
+		if (this.blockIds[voxelIndex] === blockId) {
 			return;
 		}
 
-		this.voxels[voxelIndex] = id;
-		this.dirty = true;
-	}
-
-	fill(id: VoxelId): void {
-		this.voxels.fill(id);
+		this.blockIds[voxelIndex] = blockId;
 		this.dirty = true;
 	}
 }

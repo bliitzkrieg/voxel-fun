@@ -1,3 +1,4 @@
+import { DEFAULT_VOXEL_SIZE } from '$lib/voxel/constants';
 import {
 	VOXEL_ASPHALT,
 	VOXEL_BRICK,
@@ -15,6 +16,7 @@ import {
 	fillBoxCommand,
 	hollowBoxCommand,
 	mergeVoxelCommandResult,
+	setVoxelCommand,
 	paintBoxCommand,
 	type VoxelCommandResult
 } from '$lib/voxel/voxelCommands';
@@ -81,6 +83,9 @@ export function buildDenseTestSlice(world: VoxelWorld): VoxelCommandResult {
 	fill(result, world, { x: 2, y: 0, z: 24 }, { x: 10, y: 0, z: 39 }, VOXEL_TILE);
 	paint(result, world, { x: 1, y: 1, z: 24 }, { x: 11, y: 2, z: 39 }, VOXEL_DARK_TRIM);
 	paint(result, world, { x: 21, y: 1, z: 24 }, { x: 31, y: 2, z: 39 }, VOXEL_DARK_TRIM);
+	addSizedBlock(result, world, { x: -9, y: 1, z: -8 }, VOXEL_METAL, 2);
+	addSizedBlock(result, world, { x: -4, y: 1, z: -8 }, VOXEL_GLASS, 4);
+	addSizedBlock(result, world, { x: 36, y: 1, z: -10 }, VOXEL_BRICK, 8);
 
 	return result;
 }
@@ -92,7 +97,10 @@ function fill(
 	max: WorldCoord,
 	voxelId: number
 ): void {
-	mergeVoxelCommandResult(result, fillBoxCommand(world, min, max, voxelId));
+	mergeVoxelCommandResult(
+		result,
+		fillBoxCommand(world, scaleBoxMin(min), scaleBoxMax(max), voxelId, DEFAULT_VOXEL_SIZE)
+	);
 }
 
 function hollow(
@@ -102,7 +110,10 @@ function hollow(
 	max: WorldCoord,
 	voxelId: number
 ): void {
-	mergeVoxelCommandResult(result, hollowBoxCommand(world, min, max, voxelId));
+	mergeVoxelCommandResult(
+		result,
+		hollowBoxCommand(world, scaleBoxMin(min), scaleBoxMax(max), voxelId, DEFAULT_VOXEL_SIZE)
+	);
 }
 
 function carve(
@@ -111,7 +122,7 @@ function carve(
 	min: WorldCoord,
 	max: WorldCoord
 ): void {
-	mergeVoxelCommandResult(result, carveBoxCommand(world, min, max));
+	mergeVoxelCommandResult(result, carveBoxCommand(world, scaleBoxMin(min), scaleBoxMax(max)));
 }
 
 function paint(
@@ -121,5 +132,44 @@ function paint(
 	max: WorldCoord,
 	voxelId: number
 ): void {
-	mergeVoxelCommandResult(result, paintBoxCommand(world, min, max, voxelId));
+	mergeVoxelCommandResult(
+		result,
+		paintBoxCommand(world, scaleBoxMin(min), scaleBoxMax(max), voxelId)
+	);
+}
+
+function addSizedBlock(
+	result: VoxelCommandResult,
+	world: VoxelWorld,
+	origin: WorldCoord,
+	voxelId: number,
+	size: number
+): void {
+	mergeVoxelCommandResult(
+		result,
+		setVoxelCommand(
+			world,
+			origin.x * DEFAULT_VOXEL_SIZE,
+			origin.y * DEFAULT_VOXEL_SIZE,
+			origin.z * DEFAULT_VOXEL_SIZE,
+			voxelId,
+			size
+		)
+	);
+}
+
+function scaleBoxMin(coord: WorldCoord): WorldCoord {
+	return {
+		x: coord.x * DEFAULT_VOXEL_SIZE,
+		y: coord.y * DEFAULT_VOXEL_SIZE,
+		z: coord.z * DEFAULT_VOXEL_SIZE
+	};
+}
+
+function scaleBoxMax(coord: WorldCoord): WorldCoord {
+	return {
+		x: (coord.x + 1) * DEFAULT_VOXEL_SIZE - 1,
+		y: (coord.y + 1) * DEFAULT_VOXEL_SIZE - 1,
+		z: (coord.z + 1) * DEFAULT_VOXEL_SIZE - 1
+	};
 }

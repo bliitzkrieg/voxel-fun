@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-import { VOXEL_AIR } from '$lib/voxel/constants';
+import { DEFAULT_VOXEL_SIZE, VOXEL_AIR } from '$lib/voxel/constants';
 import type { VoxelWorld } from '$lib/voxel/world';
 
 export interface PlayerCollider {
@@ -15,7 +15,7 @@ export interface PlayerPhysicsResult {
 }
 
 const COLLISION_EPSILON = 1e-5;
-const MAX_STEP_HEIGHT = 1.05;
+const MAX_STEP_HEIGHT = 1.05 * DEFAULT_VOXEL_SIZE;
 
 export function getPlayerBounds(
 	position: THREE.Vector3,

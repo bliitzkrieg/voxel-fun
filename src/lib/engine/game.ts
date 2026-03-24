@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-import { getBoxConstraintLabel, getEditorToolLabel } from '$lib/editor/editorState';
+import { getEditorToolLabel } from '$lib/editor/editorState';
 import { EditorController } from '$lib/editor/editorController';
 import { createChunkBoundsHelper, disposeDebugObject } from '$lib/debug/debugDraw';
 import { DebugStats } from '$lib/debug/stats';
@@ -9,13 +9,24 @@ import { FixedLoop } from '$lib/engine/loop';
 import { createGameScene } from '$lib/engine/scene';
 import { PlayerController } from '$lib/player/playerController';
 import { ChunkMesh } from '$lib/voxel/chunkMesh';
+import { DEFAULT_VOXEL_SIZE } from '$lib/voxel/constants';
 import { buildDenseTestSlice } from '$lib/voxel/denseTestSlice';
 import { buildChunkMesh } from '$lib/voxel/mesher';
+import { VOXEL_WORLD_SIZE } from '$lib/voxel/constants';
+import {
+	clearSerializedWorldFromStorage,
+	exportSerializedWorldToDisk,
+	importSerializedWorldFromDisk,
+	loadSerializedWorldFromStorage,
+	saveSerializedWorldToStorage
+} from '$lib/voxel/worldPersistence';
 import { getVoxelPaletteEntry } from '$lib/voxel/voxelPalette';
 import type { ChunkKey } from '$lib/voxel/voxelTypes';
 import { VoxelWorld } from '$lib/voxel/world';
 
 const SHOW_CHUNK_BOUNDS = false;
+const ENABLE_DEV_WORLD_PERSISTENCE = import.meta.env.DEV;
+const WORLD_SAVE_DEBOUNCE_MS = 300;
 
 export class Game {
 	scene!: THREE.Scene;
@@ -25,6 +36,7 @@ export class Game {
 	world!: VoxelWorld;
 	player!: PlayerController;
 	editor!: EditorController;
+	voxelRoot!: THREE.Group;
 
 	chunkMeshes: Map<ChunkKey, ChunkMesh> = new Map();
 	voxelMaterial!: THREE.MeshStandardMaterial;
@@ -37,6 +49,7 @@ export class Game {
 	private readonly chunkBounds = new Map<ChunkKey, THREE.Object3D>();
 	private readonly pendingChunkSyncKeys = new Set<ChunkKey>();
 	private lastDirtyChunkCount = 0;
+	private autoSaveHandle: number | null = null;
 
 	constructor(container: HTMLElement) {
 		this.container = container;
@@ -45,14 +58,21 @@ export class Game {
 	init(): void {
 		const { scene } = createGameScene();
 		this.scene = scene;
+		this.voxelRoot = new THREE.Group();
+		this.voxelRoot.scale.setScalar(VOXEL_WORLD_SIZE);
+		this.scene.add(this.voxelRoot);
 		this.camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
 		this.renderer = new THREE.WebGLRenderer({
 			antialias: true,
 			powerPreference: 'high-performance'
 		});
 		this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+		this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+		this.renderer.toneMappingExposure = 1.1;
+		this.renderer.shadowMap.enabled = true;
+		this.renderer.shadowMap.type = THREE.VSMShadowMap;
 		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-		this.renderer.setClearColor('#c9d0cf');
+		this.renderer.setClearColor('#bfd2d9');
 		this.renderer.domElement.style.display = 'block';
 		this.renderer.domElement.style.width = '100%';
 		this.renderer.domElement.style.height = '100%';
@@ -64,22 +84,27 @@ export class Game {
 
 		this.input = new InputState(this.renderer.domElement);
 		this.world = new VoxelWorld();
-		this.voxelMaterial = new THREE.MeshStandardMaterial({ vertexColors: true });
+		this.voxelMaterial = new THREE.MeshStandardMaterial({
+			vertexColors: true,
+			roughness: 0.92,
+			metalness: 0.06
+		});
 		this.player = new PlayerController(this.world, this.camera, this.input);
 		this.editor = new EditorController(
 			this.world,
 			this.camera,
 			this.input,
-			this.scene,
-			this.player
+			this.voxelRoot,
+			this.player,
+			(blocks) => this.applyUndoSnapshot(blocks)
 		);
 
 		this.stats = new DebugStats(this.container);
 
-		this.buildInitialWorld();
-		this.player.teleport(16, 1, 11);
+		this.loadInitialWorld();
+		this.player.teleport(16 * DEFAULT_VOXEL_SIZE, 1 * DEFAULT_VOXEL_SIZE, 11 * DEFAULT_VOXEL_SIZE);
 		this.player.setLookAngles(Math.PI, -0.05);
-		this.syncDirtyChunks();
+		this.updateViewportState();
 		this.updateSize();
 
 		this.resizeObserver = new ResizeObserver(() => {
@@ -87,17 +112,13 @@ export class Game {
 			this.render();
 		});
 		this.resizeObserver.observe(this.container);
+		window.addEventListener('beforeunload', this.handleBeforeUnload);
 
 		this.loop = new FixedLoop(
 			(dt) => this.update(dt),
 			() => this.render()
 		);
 		this.loop.start();
-	}
-
-	buildInitialWorld(): void {
-		const result = buildDenseTestSlice(this.world);
-		this.queueChunkSync(result.affectedChunkKeys);
 	}
 
 	syncDirtyChunks(): void {
@@ -114,12 +135,12 @@ export class Game {
 			if (!chunkMesh) {
 				chunkMesh = new ChunkMesh(chunk, this.voxelMaterial);
 				this.chunkMeshes.set(key, chunkMesh);
-				this.scene.add(chunkMesh.mesh);
+				this.voxelRoot.add(chunkMesh.mesh);
 
 				if (SHOW_CHUNK_BOUNDS) {
 					const helper = createChunkBoundsHelper(chunk.coord);
 					this.chunkBounds.set(key, helper);
-					this.scene.add(helper);
+					this.voxelRoot.add(helper);
 				}
 			}
 
@@ -132,7 +153,10 @@ export class Game {
 
 	update(dt: number): void {
 		this.player.update(dt);
-		this.queueChunkSync(this.editor.update());
+		const changedChunkKeys = this.editor.update();
+		this.queueChunkSync(changedChunkKeys);
+		this.scheduleWorldSave(changedChunkKeys.size > 0);
+		this.updateViewportState();
 		this.lastDirtyChunkCount = Math.max(
 			this.pendingChunkSyncKeys.size,
 			this.world.getDirtyChunks().length
@@ -153,8 +177,8 @@ export class Game {
 			editorEnabled: this.editor.state.enabled,
 			activeTool: getEditorToolLabel(this.editor.state.activeTool),
 			selectedMaterial,
+			selectedSize: this.editor.state.selectedVoxelSize,
 			mode: this.editor.state.mode,
-			planeConstraint: getBoxConstraintLabel(this.editor.state.boxConstraint),
 			hoveredChunk
 		});
 	}
@@ -167,27 +191,60 @@ export class Game {
 	dispose(): void {
 		this.loop?.dispose();
 		this.resizeObserver?.disconnect();
+		window.removeEventListener('beforeunload', this.handleBeforeUnload);
 		this.editor?.dispose();
 		this.input?.dispose();
 		this.stats?.dispose();
+		this.clearScheduledWorldSave();
 
-		for (const chunkMesh of this.chunkMeshes.values()) {
-			this.scene.remove(chunkMesh.mesh);
-			chunkMesh.dispose();
-		}
-
-		this.chunkMeshes.clear();
-
-		for (const helper of this.chunkBounds.values()) {
-			this.scene.remove(helper);
-			disposeDebugObject(helper);
-		}
-
-		this.chunkBounds.clear();
+		this.clearRenderedWorld();
+		this.scene.remove(this.voxelRoot);
 
 		this.voxelMaterial?.dispose();
 		this.renderer?.dispose();
 		this.renderer?.domElement.remove();
+	}
+
+	saveWorld(): boolean {
+		return this.flushWorldSave();
+	}
+
+	resetWorld(): boolean {
+		const reset = this.loadDefaultWorld();
+
+		if (reset) {
+			this.flushWorldSave();
+		}
+
+		return reset;
+	}
+
+	async exportWorldToDisk(): Promise<boolean> {
+		if (!ENABLE_DEV_WORLD_PERSISTENCE) {
+			return false;
+		}
+
+		return exportSerializedWorldToDisk(this.world);
+	}
+
+	async importWorldFromDisk(): Promise<boolean> {
+		if (!ENABLE_DEV_WORLD_PERSISTENCE) {
+			return false;
+		}
+
+		const snapshot = await importSerializedWorldFromDisk();
+
+		if (!snapshot) {
+			return false;
+		}
+
+		const loaded = this.applyWorldBlocks(snapshot.blocks);
+
+		if (loaded) {
+			this.flushWorldSave();
+		}
+
+		return loaded;
 	}
 
 	private updateSize(): void {
@@ -198,6 +255,118 @@ export class Game {
 		this.camera.updateProjectionMatrix();
 		this.renderer.setSize(width, height, false);
 	}
+
+	private updateViewportState(): void {
+		const crosshair = this.container.parentElement?.querySelector('.crosshair');
+
+		this.container.style.cursor = '';
+		this.renderer.domElement.style.cursor = '';
+		crosshair?.classList.toggle('crosshair-hidden', this.editor.state.enabled);
+	}
+
+	private loadInitialWorld(): void {
+		if (ENABLE_DEV_WORLD_PERSISTENCE && this.restoreWorldFromStorage()) {
+			return;
+		}
+
+		this.loadDefaultWorld();
+	}
+
+	private loadDefaultWorld(): boolean {
+		clearSerializedWorldFromStorage();
+		const seedWorld = new VoxelWorld();
+		buildDenseTestSlice(seedWorld);
+		return this.applyWorldBlocks(seedWorld.getBlocks());
+	}
+
+	private restoreWorldFromStorage(): boolean {
+		const snapshot = loadSerializedWorldFromStorage();
+
+		if (!snapshot) {
+			return false;
+		}
+
+		const restored = this.applyWorldBlocks(snapshot.blocks);
+
+		if (!restored) {
+			clearSerializedWorldFromStorage();
+		}
+
+		return restored;
+	}
+
+	private applyWorldBlocks(blocks: ReturnType<VoxelWorld['getBlocks']>): boolean {
+		if (!this.world.replaceBlocks(blocks)) {
+			return false;
+		}
+
+		this.editor.resetTransientState();
+		this.clearRenderedWorld();
+		this.syncDirtyChunks();
+		return true;
+	}
+
+	private applyUndoSnapshot(blocks: ReturnType<VoxelWorld['getBlocks']>): boolean {
+		const applied = this.applyWorldBlocks(blocks);
+
+		if (applied) {
+			this.flushWorldSave();
+		}
+
+		return applied;
+	}
+
+	private clearRenderedWorld(): void {
+		for (const chunkMesh of this.chunkMeshes.values()) {
+			this.voxelRoot.remove(chunkMesh.mesh);
+			chunkMesh.dispose();
+		}
+
+		this.chunkMeshes.clear();
+
+		for (const helper of this.chunkBounds.values()) {
+			this.voxelRoot.remove(helper);
+			disposeDebugObject(helper);
+		}
+
+		this.chunkBounds.clear();
+		this.pendingChunkSyncKeys.clear();
+		this.lastDirtyChunkCount = 0;
+	}
+
+	private scheduleWorldSave(hasWorldChanges: boolean): void {
+		if (!ENABLE_DEV_WORLD_PERSISTENCE || !hasWorldChanges) {
+			return;
+		}
+
+		this.clearScheduledWorldSave();
+		this.autoSaveHandle = window.setTimeout(() => {
+			this.autoSaveHandle = null;
+			saveSerializedWorldToStorage(this.world);
+		}, WORLD_SAVE_DEBOUNCE_MS);
+	}
+
+	private flushWorldSave(): boolean {
+		if (!ENABLE_DEV_WORLD_PERSISTENCE) {
+			return false;
+		}
+
+		this.clearScheduledWorldSave();
+		return saveSerializedWorldToStorage(this.world) !== null;
+	}
+
+	private clearScheduledWorldSave(): void {
+		if (this.autoSaveHandle === null) {
+			return;
+		}
+
+		window.clearTimeout(this.autoSaveHandle);
+		this.autoSaveHandle = null;
+	}
+
+	private handleBeforeUnload = (): void => {
+		this.flushWorldSave();
+	};
 
 	private queueChunkSync(chunkKeys: Iterable<ChunkKey>): void {
 		for (const chunkKey of chunkKeys) {
