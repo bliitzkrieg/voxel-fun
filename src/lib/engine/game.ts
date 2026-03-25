@@ -80,6 +80,7 @@ const WORLD_SAVE_DEBOUNCE_MS = 300;
 const BULK_CHUNK_SYNC_PER_FRAME = 2;
 const BULK_CHUNK_SYNC_FRAME_BUDGET_MS = 2;
 const BACKGROUND_SHADOW_REFRESH_INTERVAL_MS = 125;
+const UNDO_IMMEDIATE_CHUNK_SYNC_LIMIT = 20;
 
 export class Game {
 	scene!: THREE.Scene;
@@ -317,6 +318,9 @@ export class Game {
 
 		this.clearRenderedWorld();
 		this.scene.remove(this.voxelRoot);
+		this.scene.remove(this.sceneBundle.skyDome);
+		this.sceneBundle.skyDome.geometry.dispose();
+		this.sceneBundle.skyDome.material.dispose();
 
 		this.voxelOpaqueMaterial?.dispose();
 		this.voxelTransparentMaterial?.dispose();
@@ -711,6 +715,8 @@ export class Game {
 		);
 
 		if (applied) {
+			this.promoteBackgroundChunkSync(UNDO_IMMEDIATE_CHUNK_SYNC_LIMIT);
+			this.syncPendingChunkMeshes();
 			this.flushWorldSave();
 		}
 
@@ -776,6 +782,18 @@ export class Game {
 		}
 
 		return dirtyChunks.length;
+	}
+
+	private syncPendingChunkMeshes(): number {
+		this.pruneCleanChunkSyncKeys(this.pendingChunkSyncKeys);
+		const dirtyChunks = this.world.getDirtyChunks(this.pendingChunkSyncKeys);
+		const processedCount = this.syncChunkMeshes(dirtyChunks, this.pendingChunkSyncKeys);
+
+		if (processedCount > 0) {
+			this.invalidateShadows();
+		}
+
+		return processedCount;
 	}
 
 	private syncBackgroundChunkMeshes(): number {
@@ -873,6 +891,48 @@ export class Game {
 		}
 
 		this.nextBackgroundShadowRefreshAt = performance.now() + BACKGROUND_SHADOW_REFRESH_INTERVAL_MS;
+	}
+
+	private promoteBackgroundChunkSync(chunkLimit: number): void {
+		if (chunkLimit <= 0 || this.backgroundChunkSyncKeySet.size === 0) {
+			return;
+		}
+
+		let promotedCount = this.promoteBackgroundChunkSyncWhere(chunkLimit, (chunkKey) =>
+			this.chunkMeshes.has(chunkKey)
+		);
+
+		if (promotedCount < chunkLimit) {
+			promotedCount += this.promoteBackgroundChunkSyncWhere(chunkLimit - promotedCount, () => true);
+		}
+
+		if (promotedCount > 0) {
+			this.lastDirtyChunkCount =
+				this.pendingChunkSyncKeys.size + this.backgroundChunkSyncKeySet.size;
+		}
+	}
+
+	private promoteBackgroundChunkSyncWhere(
+		chunkLimit: number,
+		predicate: (chunkKey: ChunkKey) => boolean
+	): number {
+		let promotedCount = 0;
+
+		for (const chunkKey of this.backgroundChunkSyncQueue) {
+			if (promotedCount >= chunkLimit) {
+				break;
+			}
+
+			if (!this.backgroundChunkSyncKeySet.has(chunkKey) || !predicate(chunkKey)) {
+				continue;
+			}
+
+			this.pendingChunkSyncKeys.add(chunkKey);
+			this.backgroundChunkSyncKeySet.delete(chunkKey);
+			promotedCount += 1;
+		}
+
+		return promotedCount;
 	}
 
 	private clearRenderedWorld(): void {
