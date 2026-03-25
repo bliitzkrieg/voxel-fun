@@ -22,6 +22,7 @@ import {
 	resolveNatureGroundAnchor,
 	type NatureTreePreview
 } from '$lib/nature/natureGeneration';
+import { getNatureBrushPreviewScale, getNatureGridCenterOffset } from '$lib/nature/natureGrid';
 import type { NatureActiveTool, NatureEditorTool } from '$lib/nature/natureTypes';
 import { PlayerController } from '$lib/player/playerController';
 import { getNatureUiState } from '$lib/ui/natureState';
@@ -922,14 +923,16 @@ export class EditorController {
 		}
 
 		if (grassAnchor) {
-			const brushScale =
-				(this.state.activeTool === 'nature-flower'
+			const brushScale = getNatureBrushPreviewScale(
+				this.state.activeTool === 'nature-flower'
 					? natureState.flowerSettings.radius
-					: natureState.grassSettings.radius) + 0.58;
+					: natureState.grassSettings.radius
+			);
+			const centerOffset = getNatureGridCenterOffset();
 			this.natureBrushRoot.position.set(
-				grassAnchor.x + 0.5,
+				grassAnchor.x + centerOffset,
 				grassAnchor.surfaceY + 1.02,
-				grassAnchor.z + 0.5
+				grassAnchor.z + centerOffset
 			);
 			this.natureBrushRoot.scale.setScalar(brushScale);
 		}
@@ -1356,6 +1359,7 @@ export class EditorController {
 				this.natureTreePreviewRoot.add(
 					createNaturePreviewBlock(
 						block.origin,
+						block.size,
 						this.natureTreePreviewBoxGeometry,
 						this.natureTreePreviewEdgesGeometry,
 						this.natureTreePreviewFillMaterial,
@@ -1622,6 +1626,7 @@ function createPropPlacementPreviewBlock(
 
 function createNaturePreviewBlock(
 	origin: WorldCoord,
+	size: number,
 	boxGeometry: THREE.BoxGeometry,
 	edgesGeometry: THREE.EdgesGeometry,
 	fillMaterial: THREE.MeshBasicMaterial,
@@ -1632,8 +1637,8 @@ function createNaturePreviewBlock(
 	const wireframe = new THREE.LineSegments(edgesGeometry, wireMaterial);
 
 	group.add(mesh, wireframe);
-	group.position.set(origin.x + 0.5, origin.y + 0.5, origin.z + 0.5);
-	group.scale.setScalar(1);
+	group.position.set(origin.x + size * 0.5, origin.y + size * 0.5, origin.z + size * 0.5);
+	group.scale.setScalar(size);
 	group.renderOrder = 20;
 	return group;
 }

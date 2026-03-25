@@ -8,8 +8,8 @@ and a dev-only world save flow that survives refreshes.
 
 - Walk a small seeded voxel world in first person.
 - Toggle into edit mode and add, remove, paint, or box-edit blocks.
-- Place cubic voxel blocks at dynamic sizes from `1` to `8`.
-- Use `4` as the baseline build size, with `1-3` smaller and `5-8` larger.
+- Place cubic voxel blocks at dynamic sizes from `0.5` to `8`.
+- Use `4` as the baseline build size, with `0.5-3` smaller and `5-8` larger.
 - Sample an existing block's material and size with middle mouse.
 - Undo the last committed edit with `Ctrl+Z`.
 - Persist your world locally during development and export/import JSON snapshots.
@@ -19,7 +19,7 @@ and a dev-only world save flow that survives refreshes.
 - Mixed-size voxel blocks are stored as block instances, not just single filled cells.
 - Small voxel sizes can be placed side by side on larger surfaces without forced gaps.
 - The base voxel world scale is smaller than the original prototype:
-  `1` voxel cell is `0.25` world meters.
+  `1` internal voxel cell is `0.125` world meters.
 - The scene includes a tuned lighting pass with fog, tone mapping, and shadowed sunlight.
 - The HUD is game-style rather than debug-first, while still exposing a field readout panel.
 
@@ -56,11 +56,12 @@ Click the viewport to capture the mouse. Press `Tab` or `F1` to toggle edit mode
 
 The editor uses a discrete size ladder:
 
-- `1-3`: smaller than the default build scale
+- `0.5-3`: smaller than the default build scale
 - `4`: default baseline size
 - `5-8`: larger build steps
 
-All blocks are cubic. A larger placed voxel occupies `size x size x size` internal grid cells.
+All blocks are cubic. A larger placed voxel occupies `size x size x size` internal grid cells,
+with half-step detail now available at the smallest size.
 
 ## Dev Save Flow
 

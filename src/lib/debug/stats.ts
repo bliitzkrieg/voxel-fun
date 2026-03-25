@@ -1,4 +1,4 @@
-import { DEFAULT_VOXEL_SIZE } from '$lib/voxel/constants';
+import { DEFAULT_VOXEL_SIZE, formatVoxelSize } from '$lib/voxel/constants';
 import type { VoxelHit } from '$lib/voxel/voxelRaycast';
 import type { ChunkCoord } from '$lib/voxel/voxelTypes';
 
@@ -112,7 +112,7 @@ export class DebugStats {
 				<div class="hud-card">
 					<div class="hud-card-label">Build Loadout</div>
 					<div class="hud-card-value">${selectedMaterial}</div>
-					<div class="hud-card-subvalue">Size ${selectedSize}</div>
+					<div class="hud-card-subvalue">Size ${formatVoxelSize(selectedSize)}</div>
 				</div>
 				<div class="hud-card">
 					<div class="hud-card-label">Position</div>
@@ -127,7 +127,7 @@ export class DebugStats {
 			</div>
 			<div class="hud-target-block">
 				<div class="hud-target-title">Current Target</div>
-				<div class="hud-target-copy">${targetedVoxel ? `Block <strong>${targetedVoxel.block.size}</strong> at <strong>${targetedVoxel.block.origin.x}, ${targetedVoxel.block.origin.y}, ${targetedVoxel.block.origin.z}</strong><br />Face normal <strong>${targetedVoxel.normal.x}, ${targetedVoxel.normal.y}, ${targetedVoxel.normal.z}</strong>` : 'No block under the crosshair.'}</div>
+				<div class="hud-target-copy">${targetedVoxel ? `Block <strong>${formatVoxelSize(targetedVoxel.block.size)}</strong> at <strong>${targetedVoxel.block.origin.x}, ${targetedVoxel.block.origin.y}, ${targetedVoxel.block.origin.z}</strong><br />Face normal <strong>${targetedVoxel.normal.x}, ${targetedVoxel.normal.y}, ${targetedVoxel.normal.z}</strong>` : 'No block under the crosshair.'}</div>
 			</div>
 		`;
 	}

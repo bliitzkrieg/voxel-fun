@@ -1,4 +1,4 @@
-import { DEFAULT_VOXEL_SIZE } from '$lib/voxel/constants';
+import { DEFAULT_VOXEL_SIZE, scaleLegacyVoxelUnits } from '$lib/voxel/constants';
 import {
 	VOXEL_ASPHALT,
 	VOXEL_BRICK,
@@ -153,7 +153,7 @@ function addSizedBlock(
 			origin.y * DEFAULT_VOXEL_SIZE,
 			origin.z * DEFAULT_VOXEL_SIZE,
 			voxelId,
-			size
+			scaleLegacyVoxelUnits(size)
 		)
 	);
 }

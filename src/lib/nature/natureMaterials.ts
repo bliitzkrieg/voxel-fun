@@ -4,7 +4,9 @@ import {
 	type VoxelPaletteEntry
 } from '$lib/voxel/voxelPalette';
 
-import type { NatureRole } from '$lib/nature/natureTypes';
+import type { NatureFlowerColorMode, NatureRole } from '$lib/nature/natureTypes';
+
+type FlowerBloomColor = Exclude<NatureFlowerColorMode, 'random'>;
 
 interface NatureMaterialDefinition {
 	name: string;
@@ -17,8 +19,10 @@ interface NatureMaterialSet {
 	leaf: NatureMaterialDefinition[];
 	bark: NatureMaterialDefinition[];
 	flowerStem: NatureMaterialDefinition[];
-	flowerBloom: NatureMaterialDefinition[];
+	flowerBloom: Record<FlowerBloomColor, NatureMaterialDefinition[]>;
 }
+
+const FLOWER_BLOOM_COLOR_ORDER: FlowerBloomColor[] = ['scarlet', 'cobalt', 'amber', 'violet'];
 
 const NATURE_MATERIALS: NatureMaterialSet = {
 	grass: [
@@ -39,15 +43,32 @@ const NATURE_MATERIALS: NatureMaterialSet = {
 		{ name: 'Nature Bark Light', color: [0.36, 0.26, 0.18], natureRole: 'bark' }
 	],
 	flowerStem: [
-		{ name: 'Nature Flower Stem Deep', color: [0.18, 0.34, 0.12], natureRole: 'flower' },
-		{ name: 'Nature Flower Stem Soft', color: [0.28, 0.45, 0.18], natureRole: 'flower' }
+		{ name: 'Nature Flower Stem Root', color: [0.14, 0.28, 0.09], natureRole: 'flower' },
+		{ name: 'Nature Flower Stem Mid', color: [0.24, 0.41, 0.15], natureRole: 'flower' },
+		{ name: 'Nature Flower Stem Sun', color: [0.38, 0.57, 0.24], natureRole: 'flower' }
 	],
-	flowerBloom: [
-		{ name: 'Nature Flower Scarlet', color: [0.76, 0.21, 0.18], natureRole: 'flower' },
-		{ name: 'Nature Flower Cobalt', color: [0.2, 0.38, 0.82], natureRole: 'flower' },
-		{ name: 'Nature Flower Amber', color: [0.92, 0.52, 0.14], natureRole: 'flower' },
-		{ name: 'Nature Flower Violet', color: [0.56, 0.28, 0.76], natureRole: 'flower' }
-	]
+	flowerBloom: {
+		scarlet: [
+			{ name: 'Nature Flower Scarlet Shade', color: [0.56, 0.14, 0.12], natureRole: 'flower' },
+			{ name: 'Nature Flower Scarlet Core', color: [0.76, 0.21, 0.18], natureRole: 'flower' },
+			{ name: 'Nature Flower Scarlet Light', color: [0.95, 0.45, 0.38], natureRole: 'flower' }
+		],
+		cobalt: [
+			{ name: 'Nature Flower Cobalt Shade', color: [0.12, 0.24, 0.56], natureRole: 'flower' },
+			{ name: 'Nature Flower Cobalt Core', color: [0.2, 0.38, 0.82], natureRole: 'flower' },
+			{ name: 'Nature Flower Cobalt Light', color: [0.46, 0.65, 0.95], natureRole: 'flower' }
+		],
+		amber: [
+			{ name: 'Nature Flower Amber Shade', color: [0.64, 0.34, 0.08], natureRole: 'flower' },
+			{ name: 'Nature Flower Amber Core', color: [0.92, 0.52, 0.14], natureRole: 'flower' },
+			{ name: 'Nature Flower Amber Light', color: [1, 0.76, 0.34], natureRole: 'flower' }
+		],
+		violet: [
+			{ name: 'Nature Flower Violet Shade', color: [0.38, 0.18, 0.54], natureRole: 'flower' },
+			{ name: 'Nature Flower Violet Core', color: [0.56, 0.28, 0.76], natureRole: 'flower' },
+			{ name: 'Nature Flower Violet Light', color: [0.8, 0.58, 0.95], natureRole: 'flower' }
+		]
+	}
 };
 
 export function ensureNatureMaterials(): {
@@ -56,6 +77,7 @@ export function ensureNatureMaterials(): {
 	barkIds: number[];
 	flowerStemIds: number[];
 	flowerBloomIds: number[];
+	flowerBloomPaletteIds: Record<FlowerBloomColor, number[]>;
 	flowerIds: number[];
 } {
 	const grassIds = ensureNatureMaterialGroup(NATURE_MATERIALS.grass).map((entry) => entry.id);
@@ -64,8 +86,9 @@ export function ensureNatureMaterials(): {
 	const flowerStemIds = ensureNatureMaterialGroup(NATURE_MATERIALS.flowerStem).map(
 		(entry) => entry.id
 	);
-	const flowerBloomIds = ensureNatureMaterialGroup(NATURE_MATERIALS.flowerBloom).map(
-		(entry) => entry.id
+	const flowerBloomPaletteIds = createFlowerBloomPaletteIds();
+	const flowerBloomIds = FLOWER_BLOOM_COLOR_ORDER.flatMap(
+		(color) => flowerBloomPaletteIds[color] ?? []
 	);
 
 	return {
@@ -74,6 +97,7 @@ export function ensureNatureMaterials(): {
 		barkIds,
 		flowerStemIds,
 		flowerBloomIds,
+		flowerBloomPaletteIds,
 		flowerIds: [...flowerStemIds, ...flowerBloomIds]
 	};
 }
@@ -84,6 +108,7 @@ export function getNatureMaterialSet(): {
 	barkIds: number[];
 	flowerStemIds: number[];
 	flowerBloomIds: number[];
+	flowerBloomPaletteIds: Record<FlowerBloomColor, number[]>;
 	flowerIds: number[];
 } {
 	const ensured = ensureNatureMaterials();
@@ -96,7 +121,19 @@ export function getNatureMaterialSet(): {
 			ensured.flowerStemIds.length > 0 ? ensured.flowerStemIds : getNatureMaterialIds('flower'),
 		flowerBloomIds:
 			ensured.flowerBloomIds.length > 0 ? ensured.flowerBloomIds : getNatureMaterialIds('flower'),
+		flowerBloomPaletteIds: ensured.flowerBloomPaletteIds,
 		flowerIds: ensured.flowerIds.length > 0 ? ensured.flowerIds : getNatureMaterialIds('flower')
+	};
+}
+
+function createFlowerBloomPaletteIds(): Record<FlowerBloomColor, number[]> {
+	return {
+		scarlet: ensureNatureMaterialGroup(NATURE_MATERIALS.flowerBloom.scarlet).map(
+			(entry) => entry.id
+		),
+		cobalt: ensureNatureMaterialGroup(NATURE_MATERIALS.flowerBloom.cobalt).map((entry) => entry.id),
+		amber: ensureNatureMaterialGroup(NATURE_MATERIALS.flowerBloom.amber).map((entry) => entry.id),
+		violet: ensureNatureMaterialGroup(NATURE_MATERIALS.flowerBloom.violet).map((entry) => entry.id)
 	};
 }
 

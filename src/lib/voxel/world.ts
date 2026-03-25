@@ -362,6 +362,20 @@ export class VoxelWorld {
 		return overlappingBlocks;
 	}
 
+	getOverlappingBlocks(origin: WorldCoord, size: number): VoxelBlock[] {
+		const overlappingBlocks: VoxelBlock[] = [];
+
+		for (const blockId of this.getOverlappingBlockIds(origin, size)) {
+			const block = this.blocks.get(blockId);
+
+			if (block) {
+				overlappingBlocks.push(block);
+			}
+		}
+
+		return overlappingBlocks;
+	}
+
 	paintBlockAt(wx: number, wy: number, wz: number, materialId: VoxelId): VoxelBlock | null {
 		const block = this.getBlockAt(wx, wy, wz);
 

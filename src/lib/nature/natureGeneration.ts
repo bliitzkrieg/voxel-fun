@@ -1,5 +1,12 @@
 import * as THREE from 'three';
 
+import {
+	NATURE_BASE_VOXEL_SIZE,
+	NATURE_DETAIL_VOXEL_SIZE,
+	getNatureGridValue,
+	natureUnitsToWorld,
+	snapNatureGridCoord
+} from '$lib/nature/natureGrid';
 import { getNatureMaterialSet } from '$lib/nature/natureMaterials';
 import type {
 	NatureFlowerColorMode,
@@ -25,10 +32,11 @@ import type { VoxelWorld } from '$lib/voxel/world';
 const MAX_GRASS_HEIGHT = 4;
 const FLOWER_MIN_STEM_HEIGHT = 2;
 const FLOWER_MAX_STEM_HEIGHT = 4;
-const MAX_FLOWER_HEIGHT = FLOWER_MAX_STEM_HEIGHT + 2;
-const GROUND_SEARCH_UP = 4;
-const GROUND_SEARCH_DOWN = 14;
+const GROUND_SEARCH_UP = natureUnitsToWorld(4);
+const GROUND_SEARCH_DOWN = natureUnitsToWorld(14);
 const TREE_SCALE = 2.5;
+const MAX_GRASS_CLEAR_HEIGHT = MAX_GRASS_HEIGHT * NATURE_BASE_VOXEL_SIZE + NATURE_BASE_VOXEL_SIZE;
+const MAX_FLOWER_CLEAR_HEIGHT = FLOWER_MAX_STEM_HEIGHT * NATURE_BASE_VOXEL_SIZE + 4;
 
 export interface NatureGroundAnchor {
 	x: number;
@@ -39,6 +47,7 @@ export interface NatureGroundAnchor {
 export interface GeneratedNatureVoxel {
 	origin: WorldCoord;
 	materialId: number;
+	size: number;
 }
 
 export interface NatureTreePreview {
@@ -57,8 +66,8 @@ export function resolveNatureGroundAnchor(
 		return null;
 	}
 
-	const columnX = hit.voxel.x;
-	const columnZ = hit.voxel.z;
+	const columnX = snapNatureGridCoord(hit.voxel.x);
+	const columnZ = snapNatureGridCoord(hit.voxel.z);
 
 	if (hit.normal.y === 1 && isValidNatureGroundBlock(hit.block)) {
 		return {
@@ -93,7 +102,9 @@ export function paintNatureGrass(
 	const affectedBlockIds = new Set<number>();
 	const radius = settings.radius;
 	const radiusSq = (radius + 0.45) ** 2;
-	const brushSeed = settings.seedOffset * 17 + anchor.surfaceY * 13;
+	const anchorGridX = getNatureGridValue(anchor.x);
+	const anchorGridZ = getNatureGridValue(anchor.z);
+	const brushSeed = settings.seedOffset * 17 + getNatureGridValue(anchor.surfaceY) * 13;
 
 	for (let dz = -radius; dz <= radius; dz += 1) {
 		for (let dx = -radius; dx <= radius; dx += 1) {
@@ -103,9 +114,11 @@ export function paintNatureGrass(
 				continue;
 			}
 
-			const x = anchor.x + dx;
-			const z = anchor.z + dz;
+			const x = anchor.x + natureUnitsToWorld(dx);
+			const z = anchor.z + natureUnitsToWorld(dz);
 			const columnKey = `${x},${z}`;
+			const gridX = anchorGridX + dx;
+			const gridZ = anchorGridZ + dz;
 
 			if (visitedColumns.has(columnKey)) {
 				continue;
@@ -122,8 +135,9 @@ export function paintNatureGrass(
 			clearNatureGrassColumn(world, columnAnchor, result, affectedBlockIds);
 
 			const falloff = Math.max(0, 1 - Math.sqrt(distanceSq) / (radius + 0.45));
-			const clusterNoise = hash01(Math.floor(x * 0.5), 0, Math.floor(z * 0.5), brushSeed);
-			const placementNoise = hash01(x, columnAnchor.surfaceY, z, brushSeed + 101);
+			const columnSurfaceGridY = getNatureGridValue(columnAnchor.surfaceY);
+			const clusterNoise = hash01(Math.floor(gridX * 0.5), 0, Math.floor(gridZ * 0.5), brushSeed);
+			const placementNoise = hash01(gridX, columnSurfaceGridY, gridZ, brushSeed + 101);
 			const softenedFalloff = mix(0.34, 1, falloff);
 			const densityThreshold = clamp01(
 				settings.density * mix(0.82, 1.28, clusterNoise) * softenedFalloff +
@@ -136,7 +150,7 @@ export function paintNatureGrass(
 
 			const height = pickGrassHeight(
 				settings.heightVariance,
-				hash01(x, columnAnchor.surfaceY, z, brushSeed + 203)
+				hash01(gridX, columnSurfaceGridY, gridZ, brushSeed + 203)
 			);
 
 			if (!canPlaceGrassColumn(world, player, columnAnchor, height)) {
@@ -146,14 +160,14 @@ export function paintNatureGrass(
 			for (let step = 0; step < height; step += 1) {
 				const origin = {
 					x,
-					y: columnAnchor.surfaceY + 1 + step,
+					y: columnAnchor.surfaceY + 1 + step * NATURE_BASE_VOXEL_SIZE,
 					z
 				};
 				const materialId = pickMaterialId(
 					grassMaterialIds,
-					hash01(x, origin.y, z, brushSeed + 307 + step * 11)
+					hash01(gridX, columnSurfaceGridY + step, gridZ, brushSeed + 307 + step * 11)
 				);
-				const block = world.placeBlock(origin, 1, materialId);
+				const block = world.placeBlock(origin, NATURE_BASE_VOXEL_SIZE, materialId);
 
 				if (block) {
 					recordChangedBlock(world, block, result);
@@ -204,7 +218,7 @@ export function placeNatureTree(
 	}
 
 	for (const block of placement.blocks) {
-		const placedBlock = world.placeBlock(block.origin, 1, block.materialId);
+		const placedBlock = world.placeBlock(block.origin, block.size, block.materialId);
 
 		if (!placedBlock) {
 			return result;
@@ -223,20 +237,22 @@ export function paintNatureFlowers(
 	settings: NatureFlowerSettings
 ): VoxelCommandResult {
 	const anchor = resolveNatureGroundAnchor(world, hit);
-	const { flowerStemIds, flowerBloomIds } = getNatureMaterialSet();
-	const selectedBloomMaterialIds = resolveFlowerBloomMaterialIds(
-		settings.blossomColor,
-		flowerBloomIds
-	);
+	const { flowerStemIds, flowerBloomPaletteIds } = getNatureMaterialSet();
 	const result = createVoxelCommandResult();
 
-	if (!anchor || flowerStemIds.length === 0 || selectedBloomMaterialIds.length === 0) {
+	if (
+		!anchor ||
+		flowerStemIds.length === 0 ||
+		Object.values(flowerBloomPaletteIds).every((palette) => palette.length === 0)
+	) {
 		return result;
 	}
 
 	const radius = settings.radius;
 	const radiusSq = (radius + 0.45) ** 2;
-	const brushSeed = settings.seedOffset * 29 + anchor.surfaceY * 17;
+	const anchorGridX = getNatureGridValue(anchor.x);
+	const anchorGridZ = getNatureGridValue(anchor.z);
+	const brushSeed = settings.seedOffset * 29 + getNatureGridValue(anchor.surfaceY) * 17;
 	const clearedBlockIds = new Set<number>();
 	const removableBlockIds = new Set<number>();
 	const plannedBlocks = new Map<string, GeneratedNatureVoxel>();
@@ -251,8 +267,10 @@ export function paintNatureFlowers(
 				continue;
 			}
 
-			const x = anchor.x + dx;
-			const z = anchor.z + dz;
+			const x = anchor.x + natureUnitsToWorld(dx);
+			const z = anchor.z + natureUnitsToWorld(dz);
+			const gridX = anchorGridX + dx;
+			const gridZ = anchorGridZ + dz;
 			const columnAnchor = findGroundAnchorForColumn(world, x, z, anchor.surfaceY);
 
 			if (!columnAnchor) {
@@ -261,8 +279,9 @@ export function paintNatureFlowers(
 
 			const falloff = Math.max(0, 1 - Math.sqrt(distanceSq) / (radius + 0.45));
 			const softenedFalloff = mix(0.24, 1, falloff);
-			const clusterNoise = hash01(Math.floor(x * 0.7), 0, Math.floor(z * 0.7), brushSeed);
-			const placementNoise = hash01(x, columnAnchor.surfaceY, z, brushSeed + 101);
+			const columnSurfaceGridY = getNatureGridValue(columnAnchor.surfaceY);
+			const clusterNoise = hash01(Math.floor(gridX * 0.7), 0, Math.floor(gridZ * 0.7), brushSeed);
+			const placementNoise = hash01(gridX, columnSurfaceGridY, gridZ, brushSeed + 101);
 			const densityThreshold = clamp01(
 				settings.density * mix(0.48, 1.2, clusterNoise) * softenedFalloff
 			);
@@ -274,8 +293,12 @@ export function paintNatureFlowers(
 			const flowerBlocks = buildFlowerPlant({
 				anchor: columnAnchor,
 				stemMaterialIds: flowerStemIds,
-				bloomMaterialIds: selectedBloomMaterialIds,
-				seed: hashInt(x, columnAnchor.surfaceY, z, brushSeed + 211)
+				bloomMaterialIds: resolveFlowerBloomMaterialIds(
+					settings.blossomColor,
+					flowerBloomPaletteIds,
+					hashInt(gridX, columnSurfaceGridY, gridZ, brushSeed + 173)
+				),
+				seed: hashInt(gridX, columnSurfaceGridY, gridZ, brushSeed + 211)
 			});
 
 			if (
@@ -300,7 +323,7 @@ export function paintNatureFlowers(
 	}
 
 	for (const block of plannedBlocks.values()) {
-		const placedBlock = world.placeBlock(block.origin, 1, block.materialId);
+		const placedBlock = world.placeBlock(block.origin, block.size, block.materialId);
 
 		if (placedBlock) {
 			recordChangedBlock(world, placedBlock, result);
@@ -338,7 +361,12 @@ function buildTreePlacement(
 		};
 	}
 
-	const seed = hashInt(anchor.x, anchor.surfaceY, anchor.z, settings.seedOffset + 41);
+	const seed = hashInt(
+		getNatureGridValue(anchor.x),
+		getNatureGridValue(anchor.surfaceY),
+		getNatureGridValue(anchor.z),
+		settings.seedOffset + 41
+	);
 	const trunkHeight = pickTreeHeight(settings, seed);
 	const crownRadius = pickCrownRadius(settings, seed);
 	const branchCount = pickBranchCount(settings, seed);
@@ -376,7 +404,7 @@ function buildTreePlacement(
 		leafMaterialIds,
 		center: {
 			x: trunkX,
-			y: baseY + trunkHeight + Math.max(1, Math.floor(crownRadius * 0.4)),
+			y: baseY + natureUnitsToWorld(trunkHeight + Math.max(1, Math.floor(crownRadius * 0.4))),
 			z: trunkZ
 		},
 		radius: crownRadius,
@@ -391,7 +419,7 @@ function buildTreePlacement(
 			woodBlocks,
 			leafBlocks,
 			leafMaterialIds,
-			center: { x: branchTip.x, y: branchTip.y + 1, z: branchTip.z },
+			center: { x: branchTip.x, y: branchTip.y + NATURE_BASE_VOXEL_SIZE, z: branchTip.z },
 			radius,
 			seed: seed + 911 + index * 53
 		});
@@ -402,33 +430,39 @@ function buildTreePlacement(
 	let valid = blocks.length > 0;
 
 	for (const block of blocks) {
-		if (!player.canPlaceVoxelAt(block.origin.x, block.origin.y, block.origin.z)) {
+		if (!player.canPlaceBlockAt(block.origin, block.size)) {
 			valid = false;
 			break;
 		}
 
-		const existingBlock = world.getBlockAt(block.origin.x, block.origin.y, block.origin.z);
+		const overlappingBlocks = world.getOverlappingBlocks(block.origin, block.size);
 
-		if (!existingBlock) {
+		if (overlappingBlocks.length === 0) {
 			continue;
 		}
 
-		if (isWaterVoxelMaterial(existingBlock.materialId)) {
+		for (const existingBlock of overlappingBlocks) {
+			if (isWaterVoxelMaterial(existingBlock.materialId)) {
+				valid = false;
+				break;
+			}
+
+			if (
+				isNatureGrassMaterial(existingBlock.materialId) ||
+				isNatureLeafMaterial(existingBlock.materialId) ||
+				isNatureFlowerMaterial(existingBlock.materialId)
+			) {
+				removableBlockIds.add(existingBlock.id);
+				continue;
+			}
+
 			valid = false;
 			break;
 		}
 
-		if (
-			isNatureGrassMaterial(existingBlock.materialId) ||
-			isNatureLeafMaterial(existingBlock.materialId) ||
-			isNatureFlowerMaterial(existingBlock.materialId)
-		) {
-			removableBlockIds.add(existingBlock.id);
-			continue;
+		if (!valid) {
+			break;
 		}
-
-		valid = false;
-		break;
 	}
 
 	return {
@@ -453,6 +487,8 @@ function buildTreeTrunk(input: {
 	seed: number;
 }): void {
 	const { woodBlocks, barkMaterialIds, trunkX, trunkZ, baseY, trunkHeight, seed } = input;
+	const trunkGridX = getNatureGridValue(trunkX);
+	const trunkGridZ = getNatureGridValue(trunkZ);
 	const lowerLayerCount = Math.max(5, Math.floor(trunkHeight * 0.3));
 	const middleLayerCount = Math.max(lowerLayerCount + 4, Math.floor(trunkHeight * 0.72));
 	const lowerFootprint: Array<[number, number]> = [
@@ -475,8 +511,8 @@ function buildTreeTrunk(input: {
 	];
 
 	for (let layer = 0; layer < trunkHeight; layer += 1) {
-		const y = baseY + layer;
-		const layerNoise = hash01(trunkX, y, trunkZ, seed + 131);
+		const y = baseY + natureUnitsToWorld(layer);
+		const layerNoise = hash01(trunkGridX, layer, trunkGridZ, seed + 131);
 
 		if (layer < lowerLayerCount) {
 			let retainedCells = 0;
@@ -494,7 +530,7 @@ function buildTreeTrunk(input: {
 					isCorner &&
 					layer > 1 &&
 					layer > lowerLayerCount * 0.38 &&
-					hash01(trunkX + offsetX, y, trunkZ + offsetZ, seed + 181 + index * 19) < 0.16;
+					hash01(trunkGridX + offsetX, layer, trunkGridZ + offsetZ, seed + 181 + index * 19) < 0.16;
 
 				if (omitCorner && retainedCells >= 5) {
 					continue;
@@ -504,11 +540,14 @@ function buildTreeTrunk(input: {
 				setGeneratedBlock(
 					woodBlocks,
 					{
-						x: trunkX + offsetX,
+						x: trunkX + natureUnitsToWorld(offsetX),
 						y,
-						z: trunkZ + offsetZ
+						z: trunkZ + natureUnitsToWorld(offsetZ)
 					},
-					pickMaterialId(barkMaterialIds, hash01(trunkX + offsetX, y, trunkZ + offsetZ, seed + 229))
+					pickMaterialId(
+						barkMaterialIds,
+						hash01(trunkGridX + offsetX, layer, trunkGridZ + offsetZ, seed + 229)
+					)
 				);
 			}
 		} else if (layer < middleLayerCount) {
@@ -525,7 +564,7 @@ function buildTreeTrunk(input: {
 				const omitArm =
 					index > 0 &&
 					layer > middleLayerCount * 0.55 &&
-					hash01(trunkX + offsetX, y, trunkZ + offsetZ, seed + 247 + index * 13) < 0.12;
+					hash01(trunkGridX + offsetX, layer, trunkGridZ + offsetZ, seed + 247 + index * 13) < 0.12;
 
 				if (omitArm && retainedCells >= 3) {
 					continue;
@@ -535,18 +574,21 @@ function buildTreeTrunk(input: {
 				setGeneratedBlock(
 					woodBlocks,
 					{
-						x: trunkX + offsetX,
+						x: trunkX + natureUnitsToWorld(offsetX),
 						y,
-						z: trunkZ + offsetZ
+						z: trunkZ + natureUnitsToWorld(offsetZ)
 					},
-					pickMaterialId(barkMaterialIds, hash01(trunkX + offsetX, y, trunkZ + offsetZ, seed + 263))
+					pickMaterialId(
+						barkMaterialIds,
+						hash01(trunkGridX + offsetX, layer, trunkGridZ + offsetZ, seed + 263)
+					)
 				);
 			}
 		} else {
 			setGeneratedBlock(
 				woodBlocks,
 				{ x: trunkX, y, z: trunkZ },
-				pickMaterialId(barkMaterialIds, hash01(trunkX, y, trunkZ, seed + 277))
+				pickMaterialId(barkMaterialIds, hash01(trunkGridX, layer, trunkGridZ, seed + 277))
 			);
 		}
 
@@ -555,13 +597,17 @@ function buildTreeTrunk(input: {
 		}
 
 		if (layerNoise < 0.22) {
-			const direction = pickCardinalDirection(hashInt(trunkX, y, trunkZ, seed + 313));
+			const direction = pickCardinalDirection(hashInt(trunkGridX, layer, trunkGridZ, seed + 313));
 			setGeneratedBlock(
 				woodBlocks,
-				{ x: trunkX + direction.x, y, z: trunkZ + direction.z },
+				{
+					x: trunkX + natureUnitsToWorld(direction.x),
+					y,
+					z: trunkZ + natureUnitsToWorld(direction.z)
+				},
 				pickMaterialId(
 					barkMaterialIds,
-					hash01(trunkX + direction.x, y, trunkZ + direction.z, seed + 347)
+					hash01(trunkGridX + direction.x, layer, trunkGridZ + direction.z, seed + 347)
 				)
 			);
 		}
@@ -594,36 +640,66 @@ function buildTreeBranches(input: {
 	} = input;
 	const startLayer = Math.max(4, Math.floor(trunkHeight * 0.58));
 	const layerRange = Math.max(2, trunkHeight - startLayer - 1);
+	const trunkGridX = getNatureGridValue(trunkX);
 
 	for (let branchIndex = 0; branchIndex < branchCount; branchIndex += 1) {
 		const direction = pickCardinalDirection(seed + 401 + branchIndex * 23);
 		let x = trunkX;
 		let y =
 			baseY +
-			startLayer +
-			Math.floor(hash01(branchIndex, trunkHeight, trunkX, seed + 433) * layerRange);
+			natureUnitsToWorld(
+				startLayer +
+					Math.floor(hash01(branchIndex, trunkHeight, trunkGridX, seed + 433) * layerRange)
+			);
 		let z = trunkZ;
 		const branchLength = pickBranchLength(settings, seed + 467 + branchIndex * 29);
 
 		for (let step = 0; step < branchLength; step += 1) {
-			x += direction.x;
-			z += direction.z;
+			x += natureUnitsToWorld(direction.x);
+			z += natureUnitsToWorld(direction.z);
+			const gridX = getNatureGridValue(x);
+			const gridY = getNatureGridValue(y);
+			const gridZ = getNatureGridValue(z);
 
-			if (step > 0 || hash01(x, y, z, seed + 503 + step * 7) > 0.34) {
-				y += 1;
+			if (step > 0 || hash01(gridX, gridY, gridZ, seed + 503 + step * 7) > 0.34) {
+				y += NATURE_BASE_VOXEL_SIZE;
 			}
 
 			setGeneratedBlock(
 				woodBlocks,
 				{ x, y, z },
-				pickMaterialId(barkMaterialIds, hash01(x, y, z, seed + 541 + branchIndex * 11))
+				pickMaterialId(
+					barkMaterialIds,
+					hash01(
+						getNatureGridValue(x),
+						getNatureGridValue(y),
+						getNatureGridValue(z),
+						seed + 541 + branchIndex * 11
+					)
+				)
 			);
 
-			if (step < branchLength - 1 && hash01(x, y, z, seed + 577 + step * 29) < 0.18) {
+			if (
+				step < branchLength - 1 &&
+				hash01(
+					getNatureGridValue(x),
+					getNatureGridValue(y),
+					getNatureGridValue(z),
+					seed + 577 + step * 29
+				) < 0.18
+			) {
 				setGeneratedBlock(
 					woodBlocks,
-					{ x, y: y + 1, z },
-					pickMaterialId(barkMaterialIds, hash01(x, y + 1, z, seed + 607))
+					{ x, y: y + NATURE_BASE_VOXEL_SIZE, z },
+					pickMaterialId(
+						barkMaterialIds,
+						hash01(
+							getNatureGridValue(x),
+							getNatureGridValue(y) + 1,
+							getNatureGridValue(z),
+							seed + 607
+						)
+					)
 				);
 			}
 		}
@@ -647,15 +723,18 @@ function addLeafCluster(input: {
 	for (let dz = -radius; dz <= radius; dz += 1) {
 		for (let dy = -radius; dy <= radius + 1; dy += 1) {
 			for (let dx = -radius; dx <= radius; dx += 1) {
-				const x = center.x + dx;
-				const y = center.y + dy;
-				const z = center.z + dz;
+				const x = center.x + natureUnitsToWorld(dx);
+				const y = center.y + natureUnitsToWorld(dy);
+				const z = center.z + natureUnitsToWorld(dz);
+				const gridX = getNatureGridValue(x);
+				const gridY = getNatureGridValue(y);
+				const gridZ = getNatureGridValue(z);
 				const normalizedDistance =
 					(dx * dx) / (radius * radius) +
 					(dy * dy) / Math.max(1, radiusY * radiusY) +
 					(dz * dz) / (radius * radius);
-				const shapeNoise = hash01(x, y, z, seed + 641);
-				const fillNoise = hash01(x, y, z, seed + 683);
+				const shapeNoise = hash01(gridX, gridY, gridZ, seed + 641);
+				const fillNoise = hash01(gridX, gridY, gridZ, seed + 683);
 				const distanceThreshold = 1.02 + (shapeNoise - 0.5) * 0.3;
 				const fillThreshold = 0.28 + Math.max(0, 1 - normalizedDistance) * 0.52;
 
@@ -689,7 +768,12 @@ function addLeafCluster(input: {
 			candidate.origin,
 			pickMaterialId(
 				leafMaterialIds,
-				hash01(candidate.origin.x, candidate.origin.y, candidate.origin.z, seed + 727)
+				hash01(
+					getNatureGridValue(candidate.origin.x),
+					getNatureGridValue(candidate.origin.y),
+					getNatureGridValue(candidate.origin.z),
+					seed + 727
+				)
 			)
 		);
 	}
@@ -727,7 +811,7 @@ function clearNatureGrassColumn(
 	result: VoxelCommandResult,
 	affectedBlockIds: Set<number>
 ): void {
-	for (let step = 1; step <= MAX_GRASS_HEIGHT + 1; step += 1) {
+	for (let step = 1; step <= MAX_GRASS_CLEAR_HEIGHT; step += 1) {
 		const grassBlock = world.getBlockAt(anchor.x, anchor.surfaceY + step, anchor.z);
 
 		if (!grassBlock || !isNatureGrassMaterial(grassBlock.materialId)) {
@@ -764,8 +848,8 @@ function clearNatureFlowerFootprint(
 
 			const columnAnchor = findGroundAnchorForColumn(
 				world,
-				anchor.x + dx,
-				anchor.z + dz,
+				anchor.x + natureUnitsToWorld(dx),
+				anchor.z + natureUnitsToWorld(dz),
 				anchor.surfaceY
 			);
 
@@ -784,22 +868,26 @@ function clearNatureFlowerColumn(
 	result: VoxelCommandResult,
 	affectedBlockIds: Set<number>
 ): void {
-	for (let step = 1; step <= MAX_FLOWER_HEIGHT; step += 1) {
-		const flowerBlock = world.getBlockAt(anchor.x, anchor.surfaceY + step, anchor.z);
+	for (let z = anchor.z - 1; z <= anchor.z + NATURE_BASE_VOXEL_SIZE; z += 1) {
+		for (let y = anchor.surfaceY + 1; y <= anchor.surfaceY + MAX_FLOWER_CLEAR_HEIGHT; y += 1) {
+			for (let x = anchor.x - 1; x <= anchor.x + NATURE_BASE_VOXEL_SIZE; x += 1) {
+				const flowerBlock = world.getBlockAt(x, y, z);
 
-		if (!flowerBlock || !isNatureFlowerMaterial(flowerBlock.materialId)) {
-			continue;
-		}
+				if (!flowerBlock || !isNatureFlowerMaterial(flowerBlock.materialId)) {
+					continue;
+				}
 
-		if (affectedBlockIds.has(flowerBlock.id)) {
-			continue;
-		}
+				if (affectedBlockIds.has(flowerBlock.id)) {
+					continue;
+				}
 
-		affectedBlockIds.add(flowerBlock.id);
-		const removedBlock = world.removeBlockById(flowerBlock.id);
+				affectedBlockIds.add(flowerBlock.id);
+				const removedBlock = world.removeBlockById(flowerBlock.id);
 
-		if (removedBlock) {
-			recordChangedBlock(world, removedBlock, result);
+				if (removedBlock) {
+					recordChangedBlock(world, removedBlock, result);
+				}
+			}
 		}
 	}
 }
@@ -811,16 +899,17 @@ function canPlaceGrassColumn(
 	height: number
 ): boolean {
 	for (let step = 0; step < height; step += 1) {
-		const x = anchor.x;
-		const y = anchor.surfaceY + 1 + step;
-		const z = anchor.z;
-		const existingBlock = world.getBlockAt(x, y, z);
+		const origin = {
+			x: anchor.x,
+			y: anchor.surfaceY + 1 + step * NATURE_BASE_VOXEL_SIZE,
+			z: anchor.z
+		};
+		const overlappingBlocks = world.getOverlappingBlocks(origin, NATURE_BASE_VOXEL_SIZE);
 
-		if (existingBlock && !isNatureGrassMaterial(existingBlock.materialId)) {
-			return false;
-		}
-
-		if (!player.canPlaceVoxelAt(x, y, z)) {
+		if (
+			overlappingBlocks.some((block) => !isNatureGrassMaterial(block.materialId)) ||
+			!player.canPlaceBlockAt(origin, NATURE_BASE_VOXEL_SIZE)
+		) {
 			return false;
 		}
 	}
@@ -835,79 +924,209 @@ function buildFlowerPlant(input: {
 	seed: number;
 }): GeneratedNatureVoxel[] {
 	const { anchor, stemMaterialIds, bloomMaterialIds, seed } = input;
-	const stemHeight = pickFlowerStemHeight(hash01(anchor.x, anchor.surfaceY, anchor.z, seed + 17));
-	const blossomY = anchor.surfaceY + stemHeight + 1;
-	const stemMaterialId = pickMaterialId(
-		stemMaterialIds,
-		hash01(anchor.x, blossomY, anchor.z, seed + 31)
+	const stemHeight = pickFlowerStemHeight(
+		hash01(
+			getNatureGridValue(anchor.x),
+			getNatureGridValue(anchor.surfaceY),
+			getNatureGridValue(anchor.z),
+			seed + 17
+		)
 	);
-	const bloomMaterialId = pickMaterialId(
-		bloomMaterialIds,
-		hash01(anchor.x, blossomY, anchor.z, seed + 43)
-	);
+	const stemBaseY = anchor.surfaceY + 1;
+	const blossomBaseY = stemBaseY + stemHeight * NATURE_BASE_VOXEL_SIZE;
 	const blocks = new Map<string, GeneratedNatureVoxel>();
+	const stemShadeMaterialId = pickToneMaterialId(stemMaterialIds, 0);
+	const stemMidMaterialId = pickToneMaterialId(stemMaterialIds, 1);
+	const stemLightMaterialId = pickToneMaterialId(stemMaterialIds, 2);
+	const bloomShadeMaterialId = pickToneMaterialId(bloomMaterialIds, 0);
+	const bloomCoreMaterialId = pickToneMaterialId(bloomMaterialIds, 1);
+	const bloomLightMaterialId = pickToneMaterialId(bloomMaterialIds, 2);
 
-	for (let step = 1; step <= stemHeight; step += 1) {
-		const origin = { x: anchor.x, y: anchor.surfaceY + step, z: anchor.z };
-		setGeneratedBlock(blocks, origin, stemMaterialId);
+	for (let step = 0; step < stemHeight; step += 1) {
+		const origin = {
+			x: anchor.x,
+			y: stemBaseY + step * NATURE_BASE_VOXEL_SIZE,
+			z: anchor.z
+		};
+		const stemMaterialId =
+			step === stemHeight - 1
+				? stemLightMaterialId
+				: step >= Math.max(1, Math.ceil(stemHeight * 0.6))
+					? stemMidMaterialId
+					: stemShadeMaterialId;
+		setGeneratedBlock(blocks, origin, stemMaterialId, NATURE_BASE_VOXEL_SIZE);
 	}
 
-	setGeneratedBlock(blocks, { x: anchor.x, y: blossomY, z: anchor.z }, bloomMaterialId);
+	for (const origin of getFlowerCoreOrigins(anchor, blossomBaseY)) {
+		const isEdge = origin.x !== anchor.x || origin.z !== anchor.z;
+		setGeneratedBlock(
+			blocks,
+			origin,
+			isEdge ? bloomCoreMaterialId : bloomShadeMaterialId,
+			NATURE_DETAIL_VOXEL_SIZE
+		);
+	}
 
 	const petalDirections = rotateCardinalDirections(Math.abs(seed) % 4);
-	const petalCountNoise = hash01(anchor.x, blossomY, anchor.z, seed + 59);
-	const petalCount = petalCountNoise < 0.28 ? 1 : petalCountNoise < 0.72 ? 2 : 3;
+	const topPetalNoise = hash01(
+		getNatureGridValue(anchor.x),
+		getNatureGridValue(blossomBaseY),
+		getNatureGridValue(anchor.z),
+		seed + 59
+	);
+	const topPetalCount = topPetalNoise < 0.22 ? 2 : topPetalNoise < 0.68 ? 3 : 4;
 
-	for (let index = 0; index < petalCount; index += 1) {
+	for (let index = 0; index < petalDirections.length; index += 1) {
 		const direction = petalDirections[index];
 
 		if (!direction) {
 			continue;
 		}
 
-		setGeneratedBlock(
-			blocks,
-			{
-				x: anchor.x + direction.x,
-				y: blossomY,
-				z: anchor.z + direction.z
-			},
-			bloomMaterialId
-		);
+		for (const origin of getFlowerPetalOrigins(anchor, blossomBaseY, direction)) {
+			setGeneratedBlock(
+				blocks,
+				origin,
+				index < 2 ? bloomLightMaterialId : bloomCoreMaterialId,
+				NATURE_DETAIL_VOXEL_SIZE
+			);
+		}
 	}
 
-	if (hash01(anchor.x, blossomY, anchor.z, seed + 71) > 0.58) {
-		setGeneratedBlock(
-			blocks,
-			{
-				x: anchor.x,
-				y: blossomY + 1,
-				z: anchor.z
-			},
-			bloomMaterialId
-		);
+	for (const origin of getFlowerDiagonalOrigins(anchor, blossomBaseY, seed)) {
+		setGeneratedBlock(blocks, origin, bloomLightMaterialId, NATURE_DETAIL_VOXEL_SIZE);
+	}
+
+	for (const origin of getFlowerTopOrigins(anchor, blossomBaseY + 1, topPetalCount, seed)) {
+		setGeneratedBlock(blocks, origin, bloomLightMaterialId, NATURE_DETAIL_VOXEL_SIZE);
 	}
 
 	return [...blocks.values()];
 }
 
-function resolveFlowerBloomMaterialIds(
-	blossomColor: NatureFlowerColorMode,
-	flowerBloomIds: ReadonlyArray<number>
-): number[] {
-	if (blossomColor === 'random') {
-		return [...flowerBloomIds];
+function getFlowerCoreOrigins(anchor: NatureGroundAnchor, blossomY: number): WorldCoord[] {
+	return [
+		{ x: anchor.x, y: blossomY, z: anchor.z },
+		{ x: anchor.x + 1, y: blossomY, z: anchor.z },
+		{ x: anchor.x, y: blossomY, z: anchor.z + 1 },
+		{ x: anchor.x + 1, y: blossomY, z: anchor.z + 1 }
+	];
+}
+
+function getFlowerPetalOrigins(
+	anchor: NatureGroundAnchor,
+	blossomY: number,
+	direction: { x: number; z: number }
+): WorldCoord[] {
+	if (direction.x > 0) {
+		return [
+			{ x: anchor.x + 2, y: blossomY, z: anchor.z },
+			{ x: anchor.x + 2, y: blossomY, z: anchor.z + 1 }
+		];
 	}
 
-	const bloomIndexByColor: Record<Exclude<NatureFlowerColorMode, 'random'>, number> = {
-		scarlet: 0,
-		cobalt: 1,
-		amber: 2,
-		violet: 3
-	};
-	const bloomMaterialId = flowerBloomIds[bloomIndexByColor[blossomColor]];
+	if (direction.x < 0) {
+		return [
+			{ x: anchor.x - 1, y: blossomY, z: anchor.z },
+			{ x: anchor.x - 1, y: blossomY, z: anchor.z + 1 }
+		];
+	}
 
-	return bloomMaterialId !== undefined ? [bloomMaterialId] : [...flowerBloomIds];
+	if (direction.z > 0) {
+		return [
+			{ x: anchor.x, y: blossomY, z: anchor.z + 2 },
+			{ x: anchor.x + 1, y: blossomY, z: anchor.z + 2 }
+		];
+	}
+
+	return [
+		{ x: anchor.x, y: blossomY, z: anchor.z - 1 },
+		{ x: anchor.x + 1, y: blossomY, z: anchor.z - 1 }
+	];
+}
+
+function getFlowerDiagonalOrigins(
+	anchor: NatureGroundAnchor,
+	blossomY: number,
+	seed: number
+): WorldCoord[] {
+	const origins: WorldCoord[] = [];
+	const diagonalOffsets = [
+		{ x: -1, z: -1 },
+		{ x: 2, z: -1 },
+		{ x: -1, z: 2 },
+		{ x: 2, z: 2 }
+	];
+
+	for (let index = 0; index < diagonalOffsets.length; index += 1) {
+		const offset = diagonalOffsets[(index + Math.abs(seed)) % diagonalOffsets.length];
+
+		if (
+			!offset ||
+			hash01(
+				getNatureGridValue(anchor.x + offset.x),
+				getNatureGridValue(blossomY),
+				getNatureGridValue(anchor.z + offset.z),
+				seed + 71 + index * 13
+			) < 0.36
+		) {
+			continue;
+		}
+
+		origins.push({
+			x: anchor.x + offset.x,
+			y: blossomY,
+			z: anchor.z + offset.z
+		});
+	}
+
+	return origins;
+}
+
+function getFlowerTopOrigins(
+	anchor: NatureGroundAnchor,
+	blossomY: number,
+	count: number,
+	seed: number
+): WorldCoord[] {
+	const topOrigins = [
+		{ x: anchor.x, y: blossomY, z: anchor.z },
+		{ x: anchor.x + 1, y: blossomY, z: anchor.z },
+		{ x: anchor.x, y: blossomY, z: anchor.z + 1 },
+		{ x: anchor.x + 1, y: blossomY, z: anchor.z + 1 }
+	];
+	const offset = Math.abs(seed) % topOrigins.length;
+	const origins: WorldCoord[] = [];
+
+	for (let index = 0; index < count; index += 1) {
+		const origin = topOrigins[(index + offset) % topOrigins.length];
+
+		if (origin) {
+			origins.push(origin);
+		}
+	}
+
+	return origins;
+}
+
+function resolveFlowerBloomMaterialIds(
+	blossomColor: NatureFlowerColorMode,
+	flowerBloomPaletteIds: Record<Exclude<NatureFlowerColorMode, 'random'>, number[]>,
+	seed: number
+): number[] {
+	if (blossomColor !== 'random') {
+		return [...(flowerBloomPaletteIds[blossomColor] ?? [])];
+	}
+
+	const colorOrder: Array<Exclude<NatureFlowerColorMode, 'random'>> = [
+		'scarlet',
+		'cobalt',
+		'amber',
+		'violet'
+	];
+	const selectedColor = colorOrder[Math.abs(seed) % colorOrder.length] ?? colorOrder[0];
+
+	return [...(selectedColor ? (flowerBloomPaletteIds[selectedColor] ?? []) : [])];
 }
 
 function canQueueFlowerPlant(
@@ -920,27 +1139,26 @@ function canQueueFlowerPlant(
 	for (const block of flowerBlocks) {
 		const key = worldCoordKey(block.origin);
 
-		if (
-			plannedBlocks.has(key) ||
-			!player.canPlaceVoxelAt(block.origin.x, block.origin.y, block.origin.z)
-		) {
+		if (plannedBlocks.has(key) || !player.canPlaceBlockAt(block.origin, block.size)) {
 			return false;
 		}
 
-		const existingBlock = world.getBlockAt(block.origin.x, block.origin.y, block.origin.z);
+		const existingBlocks = world.getOverlappingBlocks(block.origin, block.size);
 
-		if (!existingBlock) {
+		if (existingBlocks.length === 0) {
 			continue;
 		}
 
-		if (
-			!isNatureGrassMaterial(existingBlock.materialId) &&
-			!isNatureFlowerMaterial(existingBlock.materialId)
-		) {
-			return false;
-		}
+		for (const existingBlock of existingBlocks) {
+			if (
+				!isNatureGrassMaterial(existingBlock.materialId) &&
+				!isNatureFlowerMaterial(existingBlock.materialId)
+			) {
+				return false;
+			}
 
-		removableBlockIds.add(existingBlock.id);
+			removableBlockIds.add(existingBlock.id);
+		}
 	}
 
 	return true;
@@ -1058,15 +1276,19 @@ function scaleTreeMeasure(baseValue: number): number {
 
 function computeBounds(blocks: ReadonlyArray<GeneratedNatureVoxel>): WorldBox {
 	const min = { ...blocks[0]!.origin };
-	const max = { ...blocks[0]!.origin };
+	const max = {
+		x: blocks[0]!.origin.x + blocks[0]!.size - 1,
+		y: blocks[0]!.origin.y + blocks[0]!.size - 1,
+		z: blocks[0]!.origin.z + blocks[0]!.size - 1
+	};
 
 	for (const block of blocks) {
 		min.x = Math.min(min.x, block.origin.x);
 		min.y = Math.min(min.y, block.origin.y);
 		min.z = Math.min(min.z, block.origin.z);
-		max.x = Math.max(max.x, block.origin.x);
-		max.y = Math.max(max.y, block.origin.y);
-		max.z = Math.max(max.z, block.origin.z);
+		max.x = Math.max(max.x, block.origin.x + block.size - 1);
+		max.y = Math.max(max.y, block.origin.y + block.size - 1);
+		max.z = Math.max(max.z, block.origin.z + block.size - 1);
 	}
 
 	return { min, max };
@@ -1079,9 +1301,9 @@ function hasOrthogonalSupport(
 ): boolean {
 	for (const offset of CARDINAL_DIRECTIONS_3D) {
 		const neighborKey = worldCoordKey({
-			x: origin.x + offset.x,
-			y: origin.y + offset.y,
-			z: origin.z + offset.z
+			x: origin.x + offset.x * NATURE_BASE_VOXEL_SIZE,
+			y: origin.y + offset.y * NATURE_BASE_VOXEL_SIZE,
+			z: origin.z + offset.z * NATURE_BASE_VOXEL_SIZE
 		});
 
 		if (woodBlocks.has(neighborKey) || leafBlocks.has(neighborKey)) {
@@ -1104,16 +1326,23 @@ function recordChangedBlock(
 function setGeneratedBlock(
 	blocks: Map<string, GeneratedNatureVoxel>,
 	origin: WorldCoord,
-	materialId: number
+	materialId: number,
+	size = NATURE_BASE_VOXEL_SIZE
 ): void {
 	blocks.set(worldCoordKey(origin), {
 		origin: { ...origin },
-		materialId
+		materialId,
+		size
 	});
 }
 
 function pickMaterialId(materialIds: number[], noise: number): number {
 	const safeIndex = Math.min(materialIds.length - 1, Math.floor(noise * materialIds.length));
+	return materialIds[safeIndex] ?? materialIds[0] ?? 0;
+}
+
+function pickToneMaterialId(materialIds: ReadonlyArray<number>, toneIndex: number): number {
+	const safeIndex = Math.max(0, Math.min(materialIds.length - 1, toneIndex));
 	return materialIds[safeIndex] ?? materialIds[0] ?? 0;
 }
 

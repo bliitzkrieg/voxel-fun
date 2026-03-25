@@ -670,7 +670,7 @@ export class Game {
 		props: SerializedPropLibraryState;
 	}): boolean {
 		const applied = this.applySerializedWorld({
-			version: 5,
+			version: 6,
 			savedAt: new Date().toISOString(),
 			blocks: snapshot.blocks,
 			materials: snapshot.palette.materials,

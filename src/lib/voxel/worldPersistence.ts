@@ -1,4 +1,5 @@
-import type { VoxelId, WorldCoord } from '$lib/voxel/voxelTypes';
+import { scaleLegacyVoxelUnits } from '$lib/voxel/constants';
+import { createWorldBox, type VoxelId, type WorldCoord } from '$lib/voxel/voxelTypes';
 import type { VoxelWorld } from '$lib/voxel/world';
 import {
 	createSerializedVoxelPaletteState,
@@ -14,7 +15,7 @@ import {
 } from '$lib/voxel/propLibrary';
 import type { SerializedWorldBlock, SerializedWorldPropInstance } from '$lib/voxel/world';
 
-const WORLD_SNAPSHOT_VERSION = 5;
+const WORLD_SNAPSHOT_VERSION = 6;
 const DEV_WORLD_STORAGE_KEY = 'voxel-fun:dev-world:v1';
 
 export type SerializedVoxelBlock = SerializedWorldBlock;
@@ -51,6 +52,16 @@ interface SerializedVoxelWorldV3 {
 
 interface SerializedVoxelWorldV4 {
 	version: 4;
+	savedAt: string;
+	blocks: SerializedVoxelBlock[];
+	materials: SerializedVoxelPaletteState['materials'];
+	hotbar: SerializedVoxelPaletteState['hotbar'];
+	props: SerializedPropDefinition[];
+	propInstances: SerializedVoxelPropInstance[];
+}
+
+interface SerializedVoxelWorldV5 {
+	version: 5;
 	savedAt: string;
 	blocks: SerializedVoxelBlock[];
 	materials: SerializedVoxelPaletteState['materials'];
@@ -227,6 +238,18 @@ function parseSerializedWorld(json: string): SerializedVoxelWorld | null {
 		});
 	}
 
+	if (candidate.version === 5) {
+		return migrateSerializedWorldV5({
+			version: 5,
+			savedAt,
+			blocks,
+			materials: candidate.materials as SerializedVoxelPaletteState['materials'],
+			hotbar: candidate.hotbar as SerializedVoxelPaletteState['hotbar'],
+			props: (candidate.props as SerializedPropDefinition[] | undefined) ?? [],
+			propInstances: (candidate.propInstances as SerializedVoxelPropInstance[] | undefined) ?? []
+		});
+	}
+
 	if (candidate.version !== WORLD_SNAPSHOT_VERSION) {
 		return null;
 	}
@@ -263,28 +286,21 @@ function parseSerializedWorld(json: string): SerializedVoxelWorld | null {
 
 function migrateSerializedWorldV1(snapshot: SerializedVoxelWorldV1): SerializedVoxelWorld | null {
 	const paletteState = getDefaultSerializedVoxelPaletteState();
+	const blocks = scaleLegacyBlocks(
+		snapshot.blocks.map((block) => ({
+			...block,
+			propInstanceId: null
+		}))
+	);
 
-	if (
-		!allBlockMaterialsExist(
-			snapshot.blocks.map((block) => ({
-				...block,
-				propInstanceId: null
-			})),
-			paletteState
-		)
-	) {
+	if (!allBlockMaterialsExist(blocks, paletteState)) {
 		return null;
 	}
 
 	return {
 		version: WORLD_SNAPSHOT_VERSION,
 		savedAt: snapshot.savedAt,
-		blocks: snapshot.blocks.map((block) => ({
-			materialId: block.materialId,
-			origin: block.origin,
-			size: block.size,
-			propInstanceId: null
-		})),
+		blocks,
 		materials: paletteState.materials,
 		hotbar: paletteState.hotbar,
 		props: [],
@@ -297,20 +313,16 @@ function migrateSerializedWorldV2(snapshot: SerializedVoxelWorldV2): SerializedV
 		materials: snapshot.materials,
 		hotbar: snapshot.hotbar
 	});
+	const blocks = scaleLegacyBlocks(snapshot.blocks);
 
-	if (!paletteState || !allBlockMaterialsExist(snapshot.blocks, paletteState)) {
+	if (!paletteState || !allBlockMaterialsExist(blocks, paletteState)) {
 		return null;
 	}
 
 	return {
 		version: WORLD_SNAPSHOT_VERSION,
 		savedAt: snapshot.savedAt,
-		blocks: snapshot.blocks.map((block) => ({
-			materialId: block.materialId,
-			origin: { ...block.origin },
-			size: block.size,
-			propInstanceId: block.propInstanceId ?? null
-		})),
+		blocks,
 		materials: paletteState.materials,
 		hotbar: paletteState.hotbar,
 		props: [],
@@ -327,13 +339,16 @@ function migrateSerializedWorldV3(snapshot: SerializedVoxelWorldV3): SerializedV
 		props: snapshot.props
 	});
 	const propInstances = normalizeSerializedPropInstances(snapshot.propInstances);
+	const blocks = scaleLegacyBlocks(snapshot.blocks);
+	const props = scaleLegacyPropDefinitions(propLibraryState?.props ?? []);
+	const scaledPropInstances = scaleLegacyPropInstances(propInstances ?? []);
 
 	if (
 		!paletteState ||
 		!propLibraryState ||
 		!propInstances ||
-		!allBlockMaterialsExist(snapshot.blocks, paletteState) ||
-		!allPropReferencesExist(snapshot.blocks, propInstances, propLibraryState)
+		!allBlockMaterialsExist(blocks, paletteState) ||
+		!allPropReferencesExist(blocks, scaledPropInstances, { props })
 	) {
 		return null;
 	}
@@ -341,16 +356,11 @@ function migrateSerializedWorldV3(snapshot: SerializedVoxelWorldV3): SerializedV
 	return {
 		version: WORLD_SNAPSHOT_VERSION,
 		savedAt: snapshot.savedAt,
-		blocks: snapshot.blocks.map((block) => ({
-			materialId: block.materialId,
-			origin: { ...block.origin },
-			size: block.size,
-			propInstanceId: block.propInstanceId ?? null
-		})),
+		blocks,
 		materials: paletteState.materials,
 		hotbar: paletteState.hotbar,
-		props: propLibraryState.props,
-		propInstances
+		props,
+		propInstances: scaledPropInstances
 	};
 }
 
@@ -363,13 +373,16 @@ function migrateSerializedWorldV4(snapshot: SerializedVoxelWorldV4): SerializedV
 		props: snapshot.props
 	});
 	const propInstances = normalizeSerializedPropInstances(snapshot.propInstances);
+	const blocks = scaleLegacyBlocks(snapshot.blocks);
+	const props = scaleLegacyPropDefinitions(propLibraryState?.props ?? []);
+	const scaledPropInstances = scaleLegacyPropInstances(propInstances ?? []);
 
 	if (
 		!paletteState ||
 		!propLibraryState ||
 		!propInstances ||
-		!allBlockMaterialsExist(snapshot.blocks, paletteState) ||
-		!allPropReferencesExist(snapshot.blocks, propInstances, propLibraryState)
+		!allBlockMaterialsExist(blocks, paletteState) ||
+		!allPropReferencesExist(blocks, scaledPropInstances, { props })
 	) {
 		return null;
 	}
@@ -377,16 +390,45 @@ function migrateSerializedWorldV4(snapshot: SerializedVoxelWorldV4): SerializedV
 	return {
 		version: WORLD_SNAPSHOT_VERSION,
 		savedAt: snapshot.savedAt,
-		blocks: snapshot.blocks.map((block) => ({
-			materialId: block.materialId,
-			origin: { ...block.origin },
-			size: block.size,
-			propInstanceId: block.propInstanceId ?? null
-		})),
+		blocks,
 		materials: paletteState.materials,
 		hotbar: paletteState.hotbar,
-		props: propLibraryState.props,
-		propInstances
+		props,
+		propInstances: scaledPropInstances
+	};
+}
+
+function migrateSerializedWorldV5(snapshot: SerializedVoxelWorldV5): SerializedVoxelWorld | null {
+	const paletteState = normalizeSerializedVoxelPaletteState({
+		materials: snapshot.materials,
+		hotbar: snapshot.hotbar
+	});
+	const propLibraryState = normalizeSerializedPropLibraryState({
+		props: snapshot.props
+	});
+	const propInstances = normalizeSerializedPropInstances(snapshot.propInstances);
+	const blocks = scaleLegacyBlocks(snapshot.blocks);
+	const props = scaleLegacyPropDefinitions(propLibraryState?.props ?? []);
+	const scaledPropInstances = scaleLegacyPropInstances(propInstances ?? []);
+
+	if (
+		!paletteState ||
+		!propLibraryState ||
+		!propInstances ||
+		!allBlockMaterialsExist(blocks, paletteState) ||
+		!allPropReferencesExist(blocks, scaledPropInstances, { props })
+	) {
+		return null;
+	}
+
+	return {
+		version: WORLD_SNAPSHOT_VERSION,
+		savedAt: snapshot.savedAt,
+		blocks,
+		materials: paletteState.materials,
+		hotbar: paletteState.hotbar,
+		props,
+		propInstances: scaledPropInstances
 	};
 }
 
@@ -546,6 +588,74 @@ function normalizeWorldCoord(coord: unknown): WorldCoord | null {
 		y: candidate.y,
 		z: candidate.z
 	};
+}
+
+function scaleLegacyBlocks(blocks: ReadonlyArray<SerializedVoxelBlock>): SerializedVoxelBlock[] {
+	return blocks.map((block) => ({
+		materialId: block.materialId,
+		origin: scaleLegacyWorldCoord(block.origin),
+		size: scaleLegacyVoxelUnits(block.size),
+		propInstanceId: block.propInstanceId ?? null
+	}));
+}
+
+function scaleLegacyPropInstances(
+	propInstances: ReadonlyArray<SerializedVoxelPropInstance>
+): SerializedVoxelPropInstance[] {
+	return propInstances.map((propInstance) => ({
+		id: propInstance.id,
+		propId: propInstance.propId,
+		origin: scaleLegacyWorldCoord(propInstance.origin),
+		rotationQuarterTurns: { ...propInstance.rotationQuarterTurns }
+	}));
+}
+
+function scaleLegacyPropDefinitions(
+	props: ReadonlyArray<SerializedPropDefinition>
+): SerializedPropDefinition[] {
+	return props.map((prop) => {
+		const blocks = prop.blocks.map((block) => ({
+			materialId: block.materialId,
+			origin: scaleLegacyWorldCoord(block.origin),
+			size: scaleLegacyVoxelUnits(block.size)
+		}));
+
+		return {
+			id: prop.id,
+			name: prop.name,
+			interactable: prop.interactable,
+			blocks,
+			bounds: computePropBounds(blocks)
+		};
+	});
+}
+
+function scaleLegacyWorldCoord(coord: WorldCoord): WorldCoord {
+	return {
+		x: scaleLegacyVoxelUnits(coord.x),
+		y: scaleLegacyVoxelUnits(coord.y),
+		z: scaleLegacyVoxelUnits(coord.z)
+	};
+}
+
+function computePropBounds(blocks: ReadonlyArray<SerializedPropDefinition['blocks'][number]>) {
+	let minX = Number.POSITIVE_INFINITY;
+	let minY = Number.POSITIVE_INFINITY;
+	let minZ = Number.POSITIVE_INFINITY;
+	let maxX = Number.NEGATIVE_INFINITY;
+	let maxY = Number.NEGATIVE_INFINITY;
+	let maxZ = Number.NEGATIVE_INFINITY;
+
+	for (const block of blocks) {
+		minX = Math.min(minX, block.origin.x);
+		minY = Math.min(minY, block.origin.y);
+		minZ = Math.min(minZ, block.origin.z);
+		maxX = Math.max(maxX, block.origin.x + block.size - 1);
+		maxY = Math.max(maxY, block.origin.y + block.size - 1);
+		maxZ = Math.max(maxZ, block.origin.z + block.size - 1);
+	}
+
+	return createWorldBox({ x: minX, y: minY, z: minZ }, { x: maxX, y: maxY, z: maxZ });
 }
 
 function compareSerializedBlocks(a: SerializedVoxelBlock, b: SerializedVoxelBlock): number {
