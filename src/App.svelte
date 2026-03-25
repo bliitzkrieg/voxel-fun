@@ -201,10 +201,6 @@
 		game?.activateNaturePreset(preset);
 	}
 
-	function handleCancelNatureTool(): void {
-		game?.cancelNatureTool();
-	}
-
 	function handleHotbarSlotClick(slotIndex: number): void {
 		setMaterialManagerAssignmentSlot(
 			materialManagerState.assignmentSlotIndex === slotIndex ? null : slotIndex
@@ -491,13 +487,7 @@
 	}
 
 	function getNatureToolTitle(): string {
-		return natureUiState.activeTool === 'grass-paint' ? 'Grass Brush Live' : 'Tree Planting Live';
-	}
-
-	function getNatureToolCopy(): string {
-		return natureUiState.activeTool === 'grass-paint'
-			? 'Drag across exposed ground to repaint patchy tufts without damaging the terrain below.'
-			: 'Click exposed ground to place a full procedural tree with rough bark, branches, and a layered canopy.';
+		return natureUiState.activeTool === 'grass-paint' ? 'Grass Painting' : 'Tree Planting';
 	}
 </script>
 
@@ -566,10 +556,14 @@
 				<span class="dock-copy">Hotbar</span>
 				<span class="keycap">L</span>
 				<span class="dock-copy">Day/Night</span>
+				<span class="keycap">G</span>
+				<span class="dock-copy">Grass</span>
+				<span class="keycap">T</span>
+				<span class="dock-copy">Trees</span>
 				<span class="keycap">M</span>
 				<span class="dock-copy">Materials</span>
 				<span class="keycap">N</span>
-				<span class="dock-copy">Nature</span>
+				<span class="dock-copy">Nature Tune</span>
 				<span class="keycap">P</span>
 				<span class="dock-copy">Props</span>
 				<span class="keycap">X</span>
@@ -1316,9 +1310,8 @@
 
 	{#if natureUiState.activeTool && !natureUiState.open && !propUiState.placementActive}
 		<div class="nature-tool-banner">
-			<div class="nature-tool-kicker">Nature Tool Live</div>
+			<div class="nature-tool-chip">Nature Live</div>
 			<div class="nature-tool-title">{getNatureToolTitle()}</div>
-			<div class="nature-tool-copy">{getNatureToolCopy()}</div>
 			<div class="nature-tool-row">
 				{#if natureUiState.activeTool === 'grass-paint'}
 					<span class="keycap">LMB Drag</span>
@@ -1328,13 +1321,10 @@
 					<span class="dock-copy">Plant</span>
 				{/if}
 				<span class="keycap">N</span>
-				<span class="dock-copy">Nature</span>
+				<span class="dock-copy">Tune</span>
 				<span class="keycap">Esc</span>
 				<span class="dock-copy">Cancel</span>
 			</div>
-			<button class="nature-tool-cancel" type="button" onclick={handleCancelNatureTool}>
-				Cancel Tool
-			</button>
 		</div>
 	{/if}
 
@@ -2356,8 +2346,7 @@
 
 	.nature-close,
 	.nature-card-activate,
-	.nature-apply,
-	.nature-tool-cancel {
+	.nature-apply {
 		border: 1px solid rgba(231, 245, 219, 0.16);
 		border-radius: 12px;
 		background:
@@ -2377,8 +2366,7 @@
 	}
 
 	.nature-close,
-	.nature-apply,
-	.nature-tool-cancel {
+	.nature-apply {
 		padding: 12px 16px;
 	}
 
@@ -2388,8 +2376,7 @@
 
 	.nature-close:hover,
 	.nature-card-activate:hover,
-	.nature-apply:hover,
-	.nature-tool-cancel:hover {
+	.nature-apply:hover {
 		border-color: rgba(185, 223, 126, 0.5);
 		transform: translateY(-1px);
 	}
@@ -2771,55 +2758,58 @@
 		left: 50%;
 		top: 92px;
 		z-index: 3;
-		display: grid;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: center;
 		gap: 10px;
-		width: min(560px, calc(100vw - 32px));
-		padding: 14px 16px;
+		max-width: calc(100vw - 32px);
+		padding: 10px 12px;
 		transform: translateX(-50%);
 		border: 1px solid rgba(221, 241, 204, 0.22);
-		border-radius: 22px;
+		border-radius: 18px;
 		background:
 			linear-gradient(180deg, rgba(16, 25, 17, 0.88), rgba(16, 25, 17, 0.68)),
 			radial-gradient(circle at top, rgba(170, 219, 108, 0.16), transparent 44%);
 		box-shadow:
-			0 24px 54px rgba(6, 10, 6, 0.3),
+			0 18px 40px rgba(6, 10, 6, 0.26),
 			inset 0 1px 0 rgba(255, 255, 255, 0.08);
 		backdrop-filter: blur(16px);
 		color: #edf6ea;
-		pointer-events: auto;
+		pointer-events: none;
 	}
 
-	.nature-tool-kicker {
-		color: rgba(208, 230, 194, 0.7);
-		font-size: 0.66rem;
+	.nature-tool-chip {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 6px 9px;
+		border: 1px solid rgba(221, 241, 204, 0.14);
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.05);
+		color: rgba(208, 230, 194, 0.74);
+		font-size: 0.62rem;
 		font-weight: 700;
-		letter-spacing: 0.16em;
+		letter-spacing: 0.14em;
 		text-transform: uppercase;
+		white-space: nowrap;
 	}
 
 	.nature-tool-title {
-		font-size: 0.96rem;
+		font-size: 0.8rem;
 		font-weight: 700;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
-	}
-
-	.nature-tool-copy {
-		color: rgba(228, 237, 220, 0.78);
-		font-size: 0.8rem;
-		line-height: 1.5;
+		white-space: nowrap;
 	}
 
 	.nature-tool-row {
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
-		gap: 8px;
-		font-size: 0.8rem;
-	}
-
-	.nature-tool-cancel {
-		justify-self: start;
+		justify-content: center;
+		gap: 7px;
+		font-size: 0.74rem;
 	}
 
 	.prop-overlay {

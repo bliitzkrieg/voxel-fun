@@ -710,6 +710,14 @@ export class Game {
 			toggleNaturePanel();
 		}
 
+		if (!ignoreToggleHotkey && !propPlacementActive && this.input.consumeKeyPress('KeyG')) {
+			this.activateNaturePreset('grass');
+		}
+
+		if (!ignoreToggleHotkey && !propPlacementActive && this.input.consumeKeyPress('KeyT')) {
+			this.activateNaturePreset('trees');
+		}
+
 		if (!ignoreToggleHotkey && !propPlacementActive && this.input.consumeKeyPress('KeyP')) {
 			closeMaterialManager();
 			closeNaturePanel();
