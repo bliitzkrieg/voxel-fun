@@ -12,7 +12,11 @@ import {
 } from '$lib/editor/editorState';
 import { BoxTool } from '$lib/editor/boxTool';
 import { BrushTool } from '$lib/editor/brushTool';
-import { ExtrudeTool } from '$lib/editor/extrudeTool';
+import {
+	ExtrudeTool,
+	resolveExtrudeFacePreview,
+	type ExtrudeFacePreview
+} from '$lib/editor/extrudeTool';
 import { NatureTool } from '$lib/editor/natureTool';
 import type { EditorTool, EditorToolContext } from '$lib/editor/editorTool';
 import { createPreviewBox, getToolTargetCoord } from '$lib/editor/editorTargets';
@@ -71,11 +75,7 @@ import type {
 	WorldBox,
 	WorldCoord
 } from '$lib/voxel/voxelTypes';
-import type {
-	SerializedWorldBlock,
-	SerializedWorldPropInstance,
-	VoxelWorld
-} from '$lib/voxel/world';
+import type { VoxelWorld } from '$lib/voxel/world';
 
 const MAX_EDIT_DISTANCE = 14 * DEFAULT_VOXEL_SIZE;
 const MAX_UNDO_ENTRIES = 64;
@@ -87,6 +87,7 @@ const PROP_VALID_COLOR = new THREE.Color('#5ef0ff');
 const PROP_INVALID_COLOR = new THREE.Color('#ff6b57');
 const NATURE_PREVIEW_COLOR = new THREE.Color('#8fd66b');
 const NATURE_INVALID_COLOR = new THREE.Color('#ff8667');
+const FACE_PREVIEW_OFFSET = 0.02;
 
 type WorldSnapshot = ReturnType<VoxelWorld['getBlocks']>;
 type PropInstanceSnapshot = ReturnType<VoxelWorld['getPropInstances']>;
@@ -134,6 +135,7 @@ export class EditorController {
 		depthTest: false
 	});
 	private readonly extrudePreviewRoot = new THREE.Group();
+	private readonly extrudeFacePreviewRoot = new THREE.Group();
 	private readonly extrudePreviewFillMaterial = new THREE.MeshBasicMaterial({
 		color: ADD_COLOR,
 		transparent: true,
@@ -147,8 +149,26 @@ export class EditorController {
 		opacity: 0.95,
 		depthTest: false
 	});
+	private readonly extrudeFacePreviewFillMaterial = new THREE.MeshBasicMaterial({
+		color: ADD_COLOR,
+		transparent: true,
+		opacity: 0.18,
+		depthWrite: false,
+		depthTest: false,
+		side: THREE.DoubleSide
+	});
+	private readonly extrudeFacePreviewWireMaterial = new THREE.LineBasicMaterial({
+		color: ADD_COLOR,
+		transparent: true,
+		opacity: 0.95,
+		depthTest: false
+	});
 	private readonly selectionBoxGeometry = new THREE.BoxGeometry(1, 1, 1);
 	private readonly selectionEdgesGeometry = new THREE.EdgesGeometry(this.selectionBoxGeometry);
+	private readonly extrudeFacePreviewGeometry = new THREE.PlaneGeometry(1, 1);
+	private readonly extrudeFacePreviewEdgesGeometry = new THREE.EdgesGeometry(
+		this.extrudeFacePreviewGeometry
+	);
 	private readonly propPlacementRoot = new THREE.Group();
 	private readonly propPlacementFillMaterial = new THREE.MeshBasicMaterial({
 		color: PROP_VALID_COLOR,
@@ -215,6 +235,7 @@ export class EditorController {
 	private selectionConnectedAppend = false;
 	private selectionWasDragged = false;
 	private activePropPlacement: ActivePropPlacement | null = null;
+	private lastExtrudeFacePreviewSignature: string | null = null;
 	private lastExtrudePreviewSignature: string | null = null;
 	private lastNatureTreePreviewSignature: string | null = null;
 
@@ -246,6 +267,8 @@ export class EditorController {
 
 		this.selectionRoot.visible = false;
 		this.selectionRoot.renderOrder = 18;
+		this.extrudeFacePreviewRoot.visible = false;
+		this.extrudeFacePreviewRoot.renderOrder = 19;
 		this.extrudePreviewRoot.visible = false;
 		this.extrudePreviewRoot.renderOrder = 19;
 		this.propPlacementRoot.visible = false;
@@ -265,6 +288,7 @@ export class EditorController {
 			this.targetHighlight,
 			this.boxPreviewWireframe,
 			this.boxPreviewGhost,
+			this.extrudeFacePreviewRoot,
 			this.extrudePreviewRoot,
 			this.selectionRoot,
 			this.natureBrushRoot,
@@ -536,6 +560,7 @@ export class EditorController {
 			this.targetHighlight,
 			this.boxPreviewWireframe,
 			this.boxPreviewGhost,
+			this.extrudeFacePreviewRoot,
 			this.extrudePreviewRoot,
 			this.selectionRoot,
 			this.natureBrushRoot,
@@ -545,6 +570,7 @@ export class EditorController {
 		disposePreviewObject(this.targetHighlight);
 		disposePreviewObject(this.boxPreviewWireframe);
 		disposePreviewObject(this.boxPreviewGhost);
+		clearGroupChildren(this.extrudeFacePreviewRoot);
 		clearGroupChildren(this.extrudePreviewRoot);
 		clearGroupChildren(this.selectionRoot);
 		clearGroupChildren(this.propPlacementRoot);
@@ -553,6 +579,10 @@ export class EditorController {
 		this.selectionBoxGeometry.dispose();
 		this.selectionWireMaterial.dispose();
 		this.selectionFillMaterial.dispose();
+		this.extrudeFacePreviewEdgesGeometry.dispose();
+		this.extrudeFacePreviewGeometry.dispose();
+		this.extrudeFacePreviewWireMaterial.dispose();
+		this.extrudeFacePreviewFillMaterial.dispose();
 		this.extrudePreviewWireMaterial.dispose();
 		this.extrudePreviewFillMaterial.dispose();
 		this.propPlacementEdgesGeometry.dispose();
@@ -829,6 +859,16 @@ export class EditorController {
 		const extrudePreviewMode = extrudeDragging ? this.extrudeTool.getPreviewMode() : null;
 		const extrudePreviewBlocks = extrudeDragging ? this.extrudeTool.getPreviewBlocks() : [];
 		const extrudePreviewSignature = extrudeDragging ? this.extrudeTool.getPreviewSignature() : null;
+		const extrudeFacePreview =
+			this.state.enabled &&
+			!this.state.selectionEnabled &&
+			!this.activePropPlacement &&
+			this.state.activeTool === 'face-extrude'
+				? extrudeDragging
+					? this.extrudeTool.getFacePreview()
+					: resolveExtrudeFacePreview(this.world, this.state.hoverHit)
+				: null;
+		const extrudeFacePreviewSignature = extrudeFacePreview?.signature ?? null;
 		const natureState = getNatureUiState();
 		const grassAnchor =
 			this.state.enabled &&
@@ -864,10 +904,12 @@ export class EditorController {
 			this.state.enabled &&
 			!this.state.selectionEnabled &&
 			!this.activePropPlacement &&
+			this.state.activeTool !== 'face-extrude' &&
 			!extrudeDragging &&
 			placementBox !== null;
 		this.boxPreviewWireframe.visible = showBoxPreview;
 		this.boxPreviewGhost.visible = showBoxPreview;
+		this.extrudeFacePreviewRoot.visible = extrudeFacePreview !== null;
 		this.extrudePreviewRoot.visible = extrudePreviewBlocks.length > 0;
 		this.selectionRoot.visible = this.selectedBlockIds.size > 0 && !this.activePropPlacement;
 		this.propPlacementRoot.visible = this.activePropPlacement !== null;
@@ -892,6 +934,35 @@ export class EditorController {
 					: this.getModeColor();
 			setPreviewColor(this.boxPreviewWireframe, previewColor);
 			setPreviewColor(this.boxPreviewGhost, previewColor);
+		}
+
+		if (
+			extrudeFacePreviewSignature &&
+			extrudeFacePreviewSignature !== this.lastExtrudeFacePreviewSignature
+		) {
+			const nextExtrudeFacePreview = extrudeFacePreview;
+			clearGroupChildren(this.extrudeFacePreviewRoot);
+
+			if (nextExtrudeFacePreview) {
+				for (const block of nextExtrudeFacePreview.blocks) {
+					this.extrudeFacePreviewRoot.add(
+						createExtrudeFacePreviewBlock(
+							block.origin,
+							block.size,
+							nextExtrudeFacePreview.normal,
+							this.extrudeFacePreviewGeometry,
+							this.extrudeFacePreviewEdgesGeometry,
+							this.extrudeFacePreviewFillMaterial,
+							this.extrudeFacePreviewWireMaterial
+						)
+					);
+				}
+			}
+
+			this.lastExtrudeFacePreviewSignature = extrudeFacePreviewSignature;
+		} else if (!extrudeFacePreviewSignature && this.lastExtrudeFacePreviewSignature !== null) {
+			clearGroupChildren(this.extrudeFacePreviewRoot);
+			this.lastExtrudeFacePreviewSignature = null;
 		}
 
 		if (extrudePreviewSignature && extrudePreviewSignature !== this.lastExtrudePreviewSignature) {
@@ -920,6 +991,12 @@ export class EditorController {
 			const extrudePreviewColor = extrudePreviewMode === 'remove' ? REMOVE_COLOR : ADD_COLOR;
 			this.extrudePreviewFillMaterial.color.copy(extrudePreviewColor);
 			this.extrudePreviewWireMaterial.color.copy(extrudePreviewColor);
+		}
+
+		if (extrudeFacePreview) {
+			const extrudeFacePreviewColor = extrudePreviewMode === 'remove' ? REMOVE_COLOR : ADD_COLOR;
+			this.extrudeFacePreviewFillMaterial.color.copy(extrudeFacePreviewColor);
+			this.extrudeFacePreviewWireMaterial.color.copy(extrudeFacePreviewColor);
 		}
 
 		if (grassAnchor) {
@@ -1504,10 +1581,10 @@ export class EditorController {
 
 	private captureUndoSnapshot(): void {
 		this.pendingUndoSnapshot = {
-			blocks: cloneWorldSnapshot(this.world.getBlocks()),
-			propInstances: clonePropInstanceSnapshot(this.world.getPropInstances()),
-			palette: clonePaletteStateSnapshot(createSerializedVoxelPaletteState()),
-			props: clonePropLibraryStateSnapshot(createSerializedPropLibraryState())
+			blocks: this.world.getBlocks(),
+			propInstances: this.world.getPropInstances(),
+			palette: createSerializedVoxelPaletteState(),
+			props: createSerializedPropLibraryState()
 		};
 		this.hasCommittedPendingUndo = false;
 	}
@@ -1517,7 +1594,7 @@ export class EditorController {
 			return;
 		}
 
-		this.undoStack.push(cloneProjectSnapshot(this.pendingUndoSnapshot));
+		this.undoStack.push(this.pendingUndoSnapshot);
 
 		if (this.undoStack.length > MAX_UNDO_ENTRIES) {
 			this.undoStack.splice(0, this.undoStack.length - MAX_UNDO_ENTRIES);
@@ -1538,7 +1615,7 @@ export class EditorController {
 		this.clearSelectionDrag();
 		this.pendingChunkKeys.clear();
 
-		if (!this.applyWorldSnapshot(cloneProjectSnapshot(snapshot))) {
+		if (!this.applyWorldSnapshot(snapshot)) {
 			this.undoStack.push(snapshot);
 		}
 	}
@@ -1599,6 +1676,25 @@ function createSelectionPreviewBlock(
 	return group;
 }
 
+function createExtrudeFacePreviewBlock(
+	origin: WorldCoord,
+	size: number,
+	normal: ExtrudeFacePreview['normal'],
+	planeGeometry: THREE.PlaneGeometry,
+	edgesGeometry: THREE.EdgesGeometry,
+	fillMaterial: THREE.MeshBasicMaterial,
+	wireMaterial: THREE.LineBasicMaterial
+): THREE.Group {
+	const group = new THREE.Group();
+	const mesh = new THREE.Mesh(planeGeometry, fillMaterial);
+	const wireframe = new THREE.LineSegments(edgesGeometry, wireMaterial);
+
+	group.add(mesh, wireframe);
+	positionExtrudeFacePreview(group, origin, size, normal);
+	group.renderOrder = 19;
+	return group;
+}
+
 function createPropPlacementPreviewBlock(
 	origin: WorldCoord,
 	size: number,
@@ -1650,6 +1746,42 @@ function positionBoxPreview(object: THREE.Object3D, box: WorldBox, scaleOffset: 
 
 	object.position.set(box.min.x + sizeX * 0.5, box.min.y + sizeY * 0.5, box.min.z + sizeZ * 0.5);
 	object.scale.set(sizeX * scaleOffset, sizeY * scaleOffset, sizeZ * scaleOffset);
+}
+
+function positionExtrudeFacePreview(
+	object: THREE.Object3D,
+	origin: WorldCoord,
+	size: number,
+	normal: ExtrudeFacePreview['normal']
+): void {
+	object.scale.set(size, size, 1);
+
+	if (normal.x !== 0) {
+		object.position.set(
+			origin.x + (normal.x > 0 ? size : 0) + normal.x * FACE_PREVIEW_OFFSET,
+			origin.y + size * 0.5,
+			origin.z + size * 0.5
+		);
+		object.rotation.set(0, normal.x > 0 ? Math.PI * 0.5 : -Math.PI * 0.5, 0);
+		return;
+	}
+
+	if (normal.y !== 0) {
+		object.position.set(
+			origin.x + size * 0.5,
+			origin.y + (normal.y > 0 ? size : 0) + normal.y * FACE_PREVIEW_OFFSET,
+			origin.z + size * 0.5
+		);
+		object.rotation.set(normal.y > 0 ? -Math.PI * 0.5 : Math.PI * 0.5, 0, 0);
+		return;
+	}
+
+	object.position.set(
+		origin.x + size * 0.5,
+		origin.y + size * 0.5,
+		origin.z + (normal.z > 0 ? size : 0) + normal.z * FACE_PREVIEW_OFFSET
+	);
+	object.rotation.set(0, normal.z > 0 ? 0 : Math.PI, 0);
 }
 
 function setPreviewColor(object: THREE.Object3D, color: THREE.Color): void {
@@ -1886,72 +2018,4 @@ function getPropSupportGap(world: VoxelWorld, blocks: ReadonlyArray<PropDefiniti
 	}
 
 	return bestGap;
-}
-
-function cloneProjectSnapshot(snapshot: ProjectSnapshot): ProjectSnapshot {
-	return {
-		blocks: cloneWorldSnapshot(snapshot.blocks),
-		propInstances: clonePropInstanceSnapshot(snapshot.propInstances),
-		palette: clonePaletteStateSnapshot(snapshot.palette),
-		props: clonePropLibraryStateSnapshot(snapshot.props)
-	};
-}
-
-function cloneWorldSnapshot(blocks: WorldSnapshot): SerializedWorldBlock[] {
-	return blocks.map((block) => ({
-		materialId: block.materialId,
-		origin: { ...block.origin },
-		size: block.size,
-		propInstanceId: block.propInstanceId
-	}));
-}
-
-function clonePropInstanceSnapshot(
-	propInstances: PropInstanceSnapshot
-): SerializedWorldPropInstance[] {
-	return propInstances.map((propInstance) => ({
-		id: propInstance.id,
-		propId: propInstance.propId,
-		origin: { ...propInstance.origin },
-		rotationQuarterTurns: { ...propInstance.rotationQuarterTurns }
-	}));
-}
-
-function clonePaletteStateSnapshot(
-	state: SerializedVoxelPaletteState
-): SerializedVoxelPaletteState {
-	return {
-		materials: state.materials.map((material) => ({
-			id: material.id,
-			name: material.name,
-			color: [...material.color] as [number, number, number],
-			opacity: material.opacity,
-			isWater: material.isWater ?? false,
-			emitsLight: material.emitsLight ?? false,
-			lightTint: [...(material.lightTint ?? material.color)] as [number, number, number],
-			archived: material.archived
-		})),
-		hotbar: [...state.hotbar]
-	};
-}
-
-function clonePropLibraryStateSnapshot(
-	state: SerializedPropLibraryState
-): SerializedPropLibraryState {
-	return {
-		props: state.props.map((prop) => ({
-			id: prop.id,
-			name: prop.name,
-			interactable: prop.interactable,
-			blocks: prop.blocks.map((block) => ({
-				materialId: block.materialId,
-				origin: { ...block.origin },
-				size: block.size
-			})),
-			bounds: {
-				min: { ...prop.bounds.min },
-				max: { ...prop.bounds.max }
-			}
-		}))
-	};
 }

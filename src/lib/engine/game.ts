@@ -77,6 +77,9 @@ import { VoxelWorld } from '$lib/voxel/world';
 const SHOW_CHUNK_BOUNDS = false;
 const ENABLE_DEV_WORLD_PERSISTENCE = import.meta.env.DEV;
 const WORLD_SAVE_DEBOUNCE_MS = 300;
+const BULK_CHUNK_SYNC_PER_FRAME = 2;
+const BULK_CHUNK_SYNC_FRAME_BUDGET_MS = 2;
+const BACKGROUND_SHADOW_REFRESH_INTERVAL_MS = 125;
 
 export class Game {
 	scene!: THREE.Scene;
@@ -103,6 +106,10 @@ export class Game {
 	private sceneBundle!: SceneBundle;
 	private readonly chunkBounds = new Map<ChunkKey, THREE.Object3D>();
 	private readonly pendingChunkSyncKeys = new Set<ChunkKey>();
+	private readonly backgroundChunkSyncKeySet = new Set<ChunkKey>();
+	private backgroundChunkSyncQueue: ChunkKey[] = [];
+	private backgroundChunkSyncIndex = 0;
+	private nextBackgroundShadowRefreshAt = 0;
 	private readonly waterSunDirection = new THREE.Vector3();
 	private readonly waterSunPosition = new THREE.Vector3();
 	private readonly waterSunTargetPosition = new THREE.Vector3();
@@ -198,43 +205,45 @@ export class Game {
 	}
 
 	syncDirtyChunks(): void {
-		const dirtyChunks =
-			this.pendingChunkSyncKeys.size > 0
-				? this.world.getDirtyChunks(this.pendingChunkSyncKeys)
-				: this.world.getDirtyChunks();
+		this.pruneCleanChunkSyncKeys(this.pendingChunkSyncKeys);
+		const immediateDirtyChunks = this.world.getDirtyChunks(this.pendingChunkSyncKeys);
+		const processedImmediateCount = this.syncChunkMeshes(
+			immediateDirtyChunks,
+			this.pendingChunkSyncKeys
+		);
+		const processedBackgroundCount = this.syncBackgroundChunkMeshes();
 
-		for (const chunk of dirtyChunks) {
-			const key = this.world.getChunkKey(chunk.coord.x, chunk.coord.y, chunk.coord.z);
-			const buffers = buildChunkMesh(this.world, chunk);
-			let chunkMesh = this.chunkMeshes.get(key);
+		if (
+			processedImmediateCount === 0 &&
+			processedBackgroundCount === 0 &&
+			this.pendingChunkSyncKeys.size === 0 &&
+			this.backgroundChunkSyncKeySet.size === 0
+		) {
+			const fallbackDirtyChunks = this.world.getDirtyChunks();
+			const processedFallbackCount = this.syncChunkMeshes(fallbackDirtyChunks, new Set<ChunkKey>());
 
-			if (!chunkMesh) {
-				chunkMesh = new ChunkMesh(
-					chunk,
-					this.voxelOpaqueMaterial,
-					this.voxelTransparentMaterial,
-					this.voxelWaterMaterial,
-					this.voxelGlowMaterial
-				);
-				this.chunkMeshes.set(key, chunkMesh);
-				this.voxelRoot.add(chunkMesh.root);
-
-				if (SHOW_CHUNK_BOUNDS) {
-					const helper = createChunkBoundsHelper(chunk.coord);
-					this.chunkBounds.set(key, helper);
-					this.voxelRoot.add(helper);
-				}
+			if (processedFallbackCount > 0) {
+				this.invalidateShadows();
 			}
 
-			chunkMesh.update(buffers);
-			this.world.clearDirty(chunk);
+			return;
 		}
 
-		if (dirtyChunks.length > 0) {
-			this.invalidateShadows();
-		}
+		if (processedImmediateCount + processedBackgroundCount > 0) {
+			if (processedImmediateCount > 0) {
+				this.invalidateShadows();
+				return;
+			}
 
-		this.pendingChunkSyncKeys.clear();
+			const backgroundWorkRemaining =
+				this.backgroundChunkSyncKeySet.size > 0 || this.backgroundChunkSyncQueue.length > 0;
+
+			if (!backgroundWorkRemaining || performance.now() >= this.nextBackgroundShadowRefreshAt) {
+				this.invalidateShadows();
+				this.nextBackgroundShadowRefreshAt =
+					performance.now() + BACKGROUND_SHADOW_REFRESH_INTERVAL_MS;
+			}
+		}
 	}
 
 	update(dt: number): void {
@@ -267,10 +276,7 @@ export class Game {
 
 		this.updateViewportState();
 		this.syncNatureToolState();
-		this.lastDirtyChunkCount = Math.max(
-			this.pendingChunkSyncKeys.size,
-			this.world.getDirtyChunks().length
-		);
+		this.lastDirtyChunkCount = this.pendingChunkSyncKeys.size + this.backgroundChunkSyncKeySet.size;
 		this.syncDirtyChunks();
 		this.emissiveLightManager.sync(this.world, this.camera.position);
 
@@ -623,7 +629,13 @@ export class Game {
 		return restored;
 	}
 
-	private applySerializedWorld(snapshot: SerializedVoxelWorld): boolean {
+	private applySerializedWorld(
+		snapshot: SerializedVoxelWorld,
+		options: {
+			preserveRenderedChunks?: boolean;
+			deferChunkSync?: boolean;
+		} = {}
+	): boolean {
 		const previousPaletteState = this.capturePaletteState();
 		const previousPropLibraryState = this.capturePropLibraryState();
 
@@ -634,7 +646,7 @@ export class Game {
 			return false;
 		}
 
-		if (!this.applyWorldState(snapshot.blocks, snapshot.propInstances)) {
+		if (!this.applyWorldState(snapshot.blocks, snapshot.propInstances, options)) {
 			restoreSerializedVoxelPaletteState(previousPaletteState);
 			restoreSerializedPropLibraryState(previousPropLibraryState);
 			return false;
@@ -645,7 +657,11 @@ export class Game {
 
 	private applyWorldState(
 		blocks: ReturnType<VoxelWorld['getBlocks']>,
-		propInstances: ReturnType<VoxelWorld['getPropInstances']>
+		propInstances: ReturnType<VoxelWorld['getPropInstances']>,
+		options: {
+			preserveRenderedChunks?: boolean;
+			deferChunkSync?: boolean;
+		} = {}
 	): boolean {
 		this.editor.cancelPlacement();
 
@@ -657,9 +673,18 @@ export class Game {
 		this.emissiveLightManager.invalidateCandidates();
 		this.editor.ensureSelectedMaterialValid();
 		this.editor.resetTransientState();
-		this.clearRenderedWorld();
-		this.syncDirtyChunks();
-		this.invalidateShadows();
+		if (options.preserveRenderedChunks) {
+			this.pruneStaleRenderedChunks();
+		} else {
+			this.clearRenderedWorld();
+		}
+
+		this.queueFullChunkSync(options.deferChunkSync ?? false);
+
+		if (!(options.deferChunkSync ?? false)) {
+			this.syncDirtyChunks();
+			this.invalidateShadows();
+		}
 		return true;
 	}
 
@@ -669,21 +694,185 @@ export class Game {
 		palette: SerializedVoxelPaletteState;
 		props: SerializedPropLibraryState;
 	}): boolean {
-		const applied = this.applySerializedWorld({
-			version: 6,
-			savedAt: new Date().toISOString(),
-			blocks: snapshot.blocks,
-			materials: snapshot.palette.materials,
-			hotbar: snapshot.palette.hotbar,
-			props: snapshot.props.props,
-			propInstances: snapshot.propInstances
-		});
+		const applied = this.applySerializedWorld(
+			{
+				version: 6,
+				savedAt: new Date().toISOString(),
+				blocks: snapshot.blocks,
+				materials: snapshot.palette.materials,
+				hotbar: snapshot.palette.hotbar,
+				props: snapshot.props.props,
+				propInstances: snapshot.propInstances
+			},
+			{
+				preserveRenderedChunks: true,
+				deferChunkSync: true
+			}
+		);
 
 		if (applied) {
 			this.flushWorldSave();
 		}
 
 		return applied;
+	}
+
+	private pruneStaleRenderedChunks(): void {
+		for (const [chunkKey, chunkMesh] of this.chunkMeshes) {
+			if (this.world.getChunkByKey(chunkKey)) {
+				continue;
+			}
+
+			this.voxelRoot.remove(chunkMesh.root);
+			chunkMesh.dispose();
+			this.chunkMeshes.delete(chunkKey);
+		}
+
+		for (const [chunkKey, helper] of this.chunkBounds) {
+			if (this.world.getChunkByKey(chunkKey)) {
+				continue;
+			}
+
+			this.voxelRoot.remove(helper);
+			disposeDebugObject(helper);
+			this.chunkBounds.delete(chunkKey);
+		}
+
+		this.pendingChunkSyncKeys.clear();
+		this.resetBackgroundChunkSyncState();
+		this.lastDirtyChunkCount = 0;
+	}
+
+	private syncChunkMeshes(
+		dirtyChunks: ReadonlyArray<ReturnType<VoxelWorld['getDirtyChunks']>[number]>,
+		queue: Set<ChunkKey>
+	): number {
+		for (const chunk of dirtyChunks) {
+			const key = this.world.getChunkKey(chunk.coord.x, chunk.coord.y, chunk.coord.z);
+			const buffers = buildChunkMesh(this.world, chunk);
+			let chunkMesh = this.chunkMeshes.get(key);
+
+			if (!chunkMesh) {
+				chunkMesh = new ChunkMesh(
+					chunk,
+					this.voxelOpaqueMaterial,
+					this.voxelTransparentMaterial,
+					this.voxelWaterMaterial,
+					this.voxelGlowMaterial
+				);
+				this.chunkMeshes.set(key, chunkMesh);
+				this.voxelRoot.add(chunkMesh.root);
+
+				if (SHOW_CHUNK_BOUNDS) {
+					const helper = createChunkBoundsHelper(chunk.coord);
+					this.chunkBounds.set(key, helper);
+					this.voxelRoot.add(helper);
+				}
+			}
+
+			chunkMesh.update(buffers);
+			this.world.clearDirty(chunk);
+			queue.delete(key);
+		}
+
+		return dirtyChunks.length;
+	}
+
+	private syncBackgroundChunkMeshes(): number {
+		if (this.backgroundChunkSyncKeySet.size === 0 || this.backgroundChunkSyncQueue.length === 0) {
+			this.resetBackgroundChunkSyncState();
+			return 0;
+		}
+
+		const startTime = performance.now();
+		const dirtyChunks: ReturnType<VoxelWorld['getDirtyChunks']> = [];
+
+		while (this.backgroundChunkSyncIndex < this.backgroundChunkSyncQueue.length) {
+			if (
+				dirtyChunks.length >= BULK_CHUNK_SYNC_PER_FRAME ||
+				performance.now() - startTime >= BULK_CHUNK_SYNC_FRAME_BUDGET_MS
+			) {
+				break;
+			}
+
+			const chunkKey = this.backgroundChunkSyncQueue[this.backgroundChunkSyncIndex++];
+
+			if (!this.backgroundChunkSyncKeySet.has(chunkKey)) {
+				continue;
+			}
+
+			const chunk = this.world.getChunkByKey(chunkKey);
+
+			if (!chunk?.dirty) {
+				this.backgroundChunkSyncKeySet.delete(chunkKey);
+			} else {
+				dirtyChunks.push(chunk);
+			}
+		}
+
+		if (this.backgroundChunkSyncIndex >= this.backgroundChunkSyncQueue.length) {
+			this.backgroundChunkSyncQueue = [];
+			this.backgroundChunkSyncIndex = 0;
+		}
+
+		const processedCount = this.syncChunkMeshes(dirtyChunks, this.backgroundChunkSyncKeySet);
+
+		if (this.backgroundChunkSyncKeySet.size === 0 && this.backgroundChunkSyncQueue.length === 0) {
+			this.nextBackgroundShadowRefreshAt = 0;
+		}
+
+		return processedCount;
+	}
+
+	private pruneCleanChunkSyncKeys(queue: Set<ChunkKey>): void {
+		for (const chunkKey of [...queue]) {
+			if (this.world.getChunkByKey(chunkKey)?.dirty) {
+				continue;
+			}
+
+			queue.delete(chunkKey);
+		}
+	}
+
+	private queueFullChunkSync(deferChunkSync: boolean): void {
+		this.pendingChunkSyncKeys.clear();
+		this.resetBackgroundChunkSyncState();
+
+		if (!deferChunkSync) {
+			for (const chunkKey of this.world.chunks.keys()) {
+				this.pendingChunkSyncKeys.add(chunkKey);
+			}
+
+			return;
+		}
+
+		const playerChunkCoord = this.world.getChunkCoordFromWorld(
+			Math.floor(this.player.position.x),
+			Math.floor(this.player.position.y),
+			Math.floor(this.player.position.z)
+		);
+		const chunkKeys = [...this.world.chunks.values()]
+			.sort((left, right) => {
+				const leftDistance =
+					(left.coord.x - playerChunkCoord.x) ** 2 +
+					(left.coord.y - playerChunkCoord.y) ** 2 +
+					(left.coord.z - playerChunkCoord.z) ** 2;
+				const rightDistance =
+					(right.coord.x - playerChunkCoord.x) ** 2 +
+					(right.coord.y - playerChunkCoord.y) ** 2 +
+					(right.coord.z - playerChunkCoord.z) ** 2;
+
+				return leftDistance - rightDistance;
+			})
+			.map((chunk) => this.world.getChunkKey(chunk.coord.x, chunk.coord.y, chunk.coord.z));
+
+		this.backgroundChunkSyncQueue = chunkKeys;
+
+		for (const chunkKey of chunkKeys) {
+			this.backgroundChunkSyncKeySet.add(chunkKey);
+		}
+
+		this.nextBackgroundShadowRefreshAt = performance.now() + BACKGROUND_SHADOW_REFRESH_INTERVAL_MS;
 	}
 
 	private clearRenderedWorld(): void {
@@ -701,7 +890,15 @@ export class Game {
 
 		this.chunkBounds.clear();
 		this.pendingChunkSyncKeys.clear();
+		this.resetBackgroundChunkSyncState();
 		this.lastDirtyChunkCount = 0;
+	}
+
+	private resetBackgroundChunkSyncState(): void {
+		this.backgroundChunkSyncKeySet.clear();
+		this.backgroundChunkSyncQueue = [];
+		this.backgroundChunkSyncIndex = 0;
+		this.nextBackgroundShadowRefreshAt = 0;
 	}
 
 	private handleOverlayHotkeys(): void {
@@ -842,6 +1039,7 @@ export class Game {
 	private queueChunkSync(chunkKeys: Iterable<ChunkKey>): void {
 		for (const chunkKey of chunkKeys) {
 			this.pendingChunkSyncKeys.add(chunkKey);
+			this.backgroundChunkSyncKeySet.delete(chunkKey);
 		}
 	}
 

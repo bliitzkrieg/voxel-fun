@@ -11,6 +11,24 @@ import type { VoxelWorld } from '$lib/voxel/world';
 const DRAG_PIXELS_PER_STEP = 24;
 const MAX_EXTRUDE_DISTANCE = 14 * DEFAULT_VOXEL_SIZE;
 const MIN_SCREEN_AXIS_LENGTH_SQ = 1e-6;
+const FACE_TANGENTS_X: ReadonlyArray<WorldCoord> = [
+	{ x: 0, y: 1, z: 0 },
+	{ x: 0, y: -1, z: 0 },
+	{ x: 0, y: 0, z: 1 },
+	{ x: 0, y: 0, z: -1 }
+];
+const FACE_TANGENTS_Y: ReadonlyArray<WorldCoord> = [
+	{ x: 1, y: 0, z: 0 },
+	{ x: -1, y: 0, z: 0 },
+	{ x: 0, y: 0, z: 1 },
+	{ x: 0, y: 0, z: -1 }
+];
+const FACE_TANGENTS_Z: ReadonlyArray<WorldCoord> = [
+	{ x: 1, y: 0, z: 0 },
+	{ x: -1, y: 0, z: 0 },
+	{ x: 0, y: 1, z: 0 },
+	{ x: 0, y: -1, z: 0 }
+];
 
 type ExtrudeSourceBlock = Pick<VoxelBlock, 'id' | 'materialId' | 'origin' | 'size'>;
 
@@ -19,15 +37,35 @@ export interface ExtrudePreviewBlock {
 	size: number;
 }
 
+export interface ExtrudeFacePreview {
+	blocks: ExtrudePreviewBlock[];
+	normal: WorldCoord;
+	signature: string;
+}
+
+interface ExtrudeFaceSelection {
+	blocks: ExtrudeSourceBlock[];
+	preview: ExtrudeFacePreview;
+}
+
 interface ExtrudeSession {
 	blocks: ExtrudeSourceBlock[];
 	normal: WorldCoord;
+	facePreview: ExtrudeFacePreview;
 	stepCount: number;
 	accumulatedDrag: number;
 	pendingInitialDeltaReset: boolean;
 	previewBlocks: ExtrudePreviewBlock[];
 	previewSignature: string | null;
 }
+
+let cachedFaceSelection: {
+	world: VoxelWorld;
+	worldVersion: number;
+	normal: WorldCoord;
+	blockIds: Set<VoxelBlockId>;
+	selection: ExtrudeFaceSelection;
+} | null = null;
 
 export class ExtrudeTool implements EditorTool {
 	private readonly normalVector = new THREE.Vector3();
@@ -39,19 +77,16 @@ export class ExtrudeTool implements EditorTool {
 	begin(context: EditorToolContext, hit: VoxelHit | null): void {
 		this.reset(context);
 
-		if (!hit || !isAxisAlignedFaceNormal(hit.normal)) {
-			return;
-		}
+		const selection = resolveExtrudeFaceSelection(context.world, hit);
 
-		const blocks = collectConnectedFaceBlocks(context.world, hit.block, hit.normal);
-
-		if (blocks.length === 0) {
+		if (!selection) {
 			return;
 		}
 
 		this.session = {
-			blocks,
-			normal: { ...hit.normal },
+			blocks: selection.blocks,
+			normal: { ...selection.preview.normal },
+			facePreview: selection.preview,
 			stepCount: 0,
 			accumulatedDrag: 0,
 			pendingInitialDeltaReset: true,
@@ -118,6 +153,10 @@ export class ExtrudeTool implements EditorTool {
 
 	getPreviewSignature(): string | null {
 		return this.session?.previewSignature ?? null;
+	}
+
+	getFacePreview(): ExtrudeFacePreview | null {
+		return this.session?.facePreview ?? null;
 	}
 
 	isActive(): boolean {
@@ -213,6 +252,56 @@ function canPlaceExtrudeLayer(
 	return true;
 }
 
+export function resolveExtrudeFacePreview(
+	world: VoxelWorld,
+	hit: VoxelHit | null
+): ExtrudeFacePreview | null {
+	return resolveExtrudeFaceSelection(world, hit)?.preview ?? null;
+}
+
+function resolveExtrudeFaceSelection(
+	world: VoxelWorld,
+	hit: VoxelHit | null
+): ExtrudeFaceSelection | null {
+	if (!hit || !isAxisAlignedFaceNormal(hit.normal)) {
+		return null;
+	}
+
+	const worldVersion = world.getMutationVersion();
+
+	if (
+		cachedFaceSelection &&
+		cachedFaceSelection.world === world &&
+		cachedFaceSelection.worldVersion === worldVersion &&
+		areWorldCoordsEqual(cachedFaceSelection.normal, hit.normal) &&
+		cachedFaceSelection.blockIds.has(hit.block.id)
+	) {
+		return cachedFaceSelection.selection;
+	}
+
+	const blocks = collectConnectedFaceBlocks(world, hit.block, hit.normal);
+
+	if (blocks.length === 0) {
+		cachedFaceSelection = null;
+		return null;
+	}
+
+	const selection = {
+		blocks,
+		preview: createExtrudeFacePreview(blocks, hit.normal)
+	};
+
+	cachedFaceSelection = {
+		world,
+		worldVersion,
+		normal: { ...hit.normal },
+		blockIds: new Set(blocks.map((block) => block.id)),
+		selection
+	};
+
+	return selection;
+}
+
 function collectConnectedFaceBlocks(
 	world: VoxelWorld,
 	startBlock: Pick<VoxelBlock, 'id' | 'materialId' | 'origin' | 'size'>,
@@ -221,14 +310,12 @@ function collectConnectedFaceBlocks(
 	const planeCoordinate = getFacePlaneCoordinate(startBlock, normal);
 	const visited = new Set<VoxelBlockId>([startBlock.id]);
 	const queue: VoxelBlockId[] = [startBlock.id];
+	let queueIndex = 0;
 	const blocks: ExtrudeSourceBlock[] = [];
+	const tangents = getFaceTangentDirections(normal);
 
-	while (queue.length > 0) {
-		const currentBlockId = queue.shift();
-
-		if (currentBlockId === undefined) {
-			continue;
-		}
+	while (queueIndex < queue.length) {
+		const currentBlockId = queue[queueIndex++];
 
 		const currentBlock = world.blocks.get(currentBlockId);
 
@@ -251,7 +338,8 @@ function collectConnectedFaceBlocks(
 			world,
 			currentBlock,
 			normal,
-			planeCoordinate
+			planeCoordinate,
+			tangents
 		)) {
 			if (visited.has(neighborBlockId)) {
 				continue;
@@ -269,11 +357,12 @@ function getConnectedFaceNeighborBlockIds(
 	world: VoxelWorld,
 	block: Pick<VoxelBlock, 'id' | 'materialId' | 'origin' | 'size'>,
 	normal: WorldCoord,
-	planeCoordinate: number
-): Set<VoxelBlockId> {
-	const neighborIds = new Set<VoxelBlockId>();
+	planeCoordinate: number,
+	tangents: ReadonlyArray<WorldCoord>
+): VoxelBlockId[] {
+	const neighborIds: VoxelBlockId[] = [];
 
-	for (const tangent of getFaceTangentDirections(normal)) {
+	for (const tangent of tangents) {
 		const neighborOrigin = offsetWorldCoord(block.origin, tangent, block.size);
 		const neighborBlock = world.getBlockAt(neighborOrigin.x, neighborOrigin.y, neighborOrigin.z);
 
@@ -288,7 +377,7 @@ function getConnectedFaceNeighborBlockIds(
 			continue;
 		}
 
-		neighborIds.add(neighborBlock.id);
+		neighborIds.push(neighborBlock.id);
 	}
 
 	return neighborIds;
@@ -355,31 +444,16 @@ function isBlockFaceClear(
 	return true;
 }
 
-function getFaceTangentDirections(normal: WorldCoord): WorldCoord[] {
+function getFaceTangentDirections(normal: WorldCoord): ReadonlyArray<WorldCoord> {
 	if (normal.x !== 0) {
-		return [
-			{ x: 0, y: 1, z: 0 },
-			{ x: 0, y: -1, z: 0 },
-			{ x: 0, y: 0, z: 1 },
-			{ x: 0, y: 0, z: -1 }
-		];
+		return FACE_TANGENTS_X;
 	}
 
 	if (normal.y !== 0) {
-		return [
-			{ x: 1, y: 0, z: 0 },
-			{ x: -1, y: 0, z: 0 },
-			{ x: 0, y: 0, z: 1 },
-			{ x: 0, y: 0, z: -1 }
-		];
+		return FACE_TANGENTS_Y;
 	}
 
-	return [
-		{ x: 1, y: 0, z: 0 },
-		{ x: -1, y: 0, z: 0 },
-		{ x: 0, y: 1, z: 0 },
-		{ x: 0, y: -1, z: 0 }
-	];
+	return FACE_TANGENTS_Z;
 }
 
 function getFacePlaneCoordinate(
@@ -409,6 +483,20 @@ function getFacePlaneCoordinate(
 	return block.origin.z;
 }
 
+function createExtrudeFacePreview(
+	blocks: ReadonlyArray<Pick<VoxelBlock, 'origin' | 'size'>>,
+	normal: WorldCoord
+): ExtrudeFacePreview {
+	return {
+		blocks: blocks.map((block) => ({
+			origin: { ...block.origin },
+			size: block.size
+		})),
+		normal: { ...normal },
+		signature: createFacePreviewSignature(blocks, normal)
+	};
+}
+
 function createPreviewSignature(blocks: ReadonlyArray<ExtrudePreviewBlock>): string | null {
 	if (blocks.length === 0) {
 		return null;
@@ -417,6 +505,15 @@ function createPreviewSignature(blocks: ReadonlyArray<ExtrudePreviewBlock>): str
 	return blocks
 		.map((block) => `${block.origin.x},${block.origin.y},${block.origin.z}:${block.size}`)
 		.join('|');
+}
+
+function createFacePreviewSignature(
+	blocks: ReadonlyArray<Pick<VoxelBlock, 'origin' | 'size'>>,
+	normal: WorldCoord
+): string {
+	return `${normal.x},${normal.y},${normal.z}:${blocks
+		.map((block) => `${block.origin.x},${block.origin.y},${block.origin.z}:${block.size}`)
+		.join('|')}`;
 }
 
 function cloneExtrudeSourceBlock(block: ExtrudeSourceBlock): ExtrudeSourceBlock {
@@ -459,4 +556,8 @@ function offsetWorldCoord(origin: WorldCoord, normal: WorldCoord, distance: numb
 		y: origin.y + normal.y * distance,
 		z: origin.z + normal.z * distance
 	};
+}
+
+function areWorldCoordsEqual(a: WorldCoord, b: WorldCoord): boolean {
+	return a.x === b.x && a.y === b.y && a.z === b.z;
 }

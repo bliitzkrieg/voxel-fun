@@ -37,6 +37,7 @@ export class VoxelWorld {
 
 	private nextBlockId: VoxelBlockId = 1;
 	private nextPropInstanceId: PropInstanceId = 1;
+	private mutationVersion = 0;
 
 	getChunkKey(x: number, y: number, z: number): ChunkKey {
 		return `${x},${y},${z}`;
@@ -68,6 +69,10 @@ export class VoxelWorld {
 			y: Math.floor(wy / CHUNK_SIZE),
 			z: Math.floor(wz / CHUNK_SIZE)
 		};
+	}
+
+	getMutationVersion(): number {
+		return this.mutationVersion;
 	}
 
 	getLocalCoord(wx: number, wy: number, wz: number): LocalCoord {
@@ -191,6 +196,7 @@ export class VoxelWorld {
 			return true;
 		});
 		this.markChunksDirtyForBlock(block);
+		this.mutationVersion += 1;
 
 		return block;
 	}
@@ -277,6 +283,7 @@ export class VoxelWorld {
 			return true;
 		});
 		this.markChunksDirtyForBlock(block);
+		this.mutationVersion += 1;
 
 		return block;
 	}
@@ -473,6 +480,7 @@ export class VoxelWorld {
 		this.propInstances = nextWorld.propInstances;
 		this.nextBlockId = nextWorld.nextBlockId;
 		this.nextPropInstanceId = nextWorld.nextPropInstanceId;
+		this.mutationVersion += 1;
 		return true;
 	}
 
