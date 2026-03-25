@@ -374,6 +374,8 @@ export class EditorController {
 		switch (this.state.activeTool) {
 			case 'nature-grass':
 				return 'grass-paint';
+			case 'nature-flower':
+				return 'flower-paint';
 			case 'nature-tree':
 				return 'tree-place';
 			default:
@@ -798,7 +800,7 @@ export class EditorController {
 			this.state.enabled &&
 			!this.state.selectionEnabled &&
 			!this.activePropPlacement &&
-			this.state.activeTool === 'nature-grass'
+			(this.state.activeTool === 'nature-grass' || this.state.activeTool === 'nature-flower')
 				? resolveNatureGroundAnchor(this.world, this.state.hoverHit)
 				: null;
 		const treePreview =
@@ -853,7 +855,10 @@ export class EditorController {
 		}
 
 		if (grassAnchor) {
-			const brushScale = natureState.grassSettings.radius + 0.58;
+			const brushScale =
+				(this.state.activeTool === 'nature-flower'
+					? natureState.flowerSettings.radius
+					: natureState.grassSettings.radius) + 0.58;
 			this.natureBrushRoot.position.set(
 				grassAnchor.x + 0.5,
 				grassAnchor.surfaceY + 1.02,
@@ -1310,7 +1315,11 @@ export class EditorController {
 	}
 
 	private isNatureToolActive(): boolean {
-		return this.state.activeTool === 'nature-grass' || this.state.activeTool === 'nature-tree';
+		return (
+			this.state.activeTool === 'nature-grass' ||
+			this.state.activeTool === 'nature-flower' ||
+			this.state.activeTool === 'nature-tree'
+		);
 	}
 
 	private clearSelectionDrag(): void {

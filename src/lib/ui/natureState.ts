@@ -1,9 +1,11 @@
 import {
+	DEFAULT_NATURE_FLOWER_SETTINGS,
 	DEFAULT_NATURE_GRASS_SETTINGS,
 	DEFAULT_NATURE_TREE_SETTINGS,
 	getNaturePresetForTool,
 	getNatureToolForPreset,
 	type NatureActiveTool,
+	type NatureFlowerSettings,
 	type NatureGrassSettings,
 	type NaturePreset,
 	type NatureTreeSettings
@@ -14,6 +16,7 @@ export interface NatureUiState {
 	activePreset: NaturePreset | null;
 	activeTool: NatureActiveTool | null;
 	grassSettings: NatureGrassSettings;
+	flowerSettings: NatureFlowerSettings;
 	treeSettings: NatureTreeSettings;
 }
 
@@ -26,6 +29,7 @@ let state: NatureUiState = {
 	activePreset: 'grass',
 	activeTool: null,
 	grassSettings: { ...DEFAULT_NATURE_GRASS_SETTINGS },
+	flowerSettings: { ...DEFAULT_NATURE_FLOWER_SETTINGS },
 	treeSettings: { ...DEFAULT_NATURE_TREE_SETTINGS }
 };
 
@@ -35,6 +39,7 @@ export function getNatureUiState(): NatureUiState {
 		activePreset: state.activePreset,
 		activeTool: state.activeTool,
 		grassSettings: { ...state.grassSettings },
+		flowerSettings: { ...state.flowerSettings },
 		treeSettings: { ...state.treeSettings }
 	};
 }
@@ -168,6 +173,26 @@ export function updateNatureTreeSettings(input: Partial<NatureTreeSettings>): vo
 	emit();
 }
 
+export function updateNatureFlowerSettings(input: Partial<NatureFlowerSettings>): void {
+	const nextSettings: NatureFlowerSettings = {
+		...state.flowerSettings,
+		...input,
+		radius: clampInteger(input.radius ?? state.flowerSettings.radius, 1, 10),
+		density: clampFloat(input.density ?? state.flowerSettings.density, 0.05, 1),
+		seedOffset: clampInteger(input.seedOffset ?? state.flowerSettings.seedOffset, 0, 9999)
+	};
+
+	if (areFlowerSettingsEqual(state.flowerSettings, nextSettings)) {
+		return;
+	}
+
+	state = {
+		...state,
+		flowerSettings: nextSettings
+	};
+	emit();
+}
+
 function emit(): void {
 	const snapshot = getNatureUiState();
 
@@ -195,4 +220,8 @@ function areGrassSettingsEqual(a: NatureGrassSettings, b: NatureGrassSettings): 
 
 function areTreeSettingsEqual(a: NatureTreeSettings, b: NatureTreeSettings): boolean {
 	return a.size === b.size && a.seedOffset === b.seedOffset;
+}
+
+function areFlowerSettingsEqual(a: NatureFlowerSettings, b: NatureFlowerSettings): boolean {
+	return a.radius === b.radius && a.density === b.density && a.seedOffset === b.seedOffset;
 }

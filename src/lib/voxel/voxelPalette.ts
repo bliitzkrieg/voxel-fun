@@ -383,7 +383,11 @@ export function getVoxelSurfaceProfile(id: VoxelId): VoxelSurfaceProfile {
 		return { ...baseProfile };
 	}
 
-	if (entry.natureRole === 'grass' || entry.natureRole === 'leaf') {
+	if (
+		entry.natureRole === 'grass' ||
+		entry.natureRole === 'leaf' ||
+		entry.natureRole === 'flower'
+	) {
 		return {
 			roughness: 0.96,
 			metalness: 0,
@@ -437,9 +441,13 @@ export function isNatureBarkMaterial(id: VoxelId): boolean {
 	return getVoxelNatureRole(id) === 'bark';
 }
 
+export function isNatureFlowerMaterial(id: VoxelId): boolean {
+	return getVoxelNatureRole(id) === 'flower';
+}
+
 export function isNatureFoliageMaterial(id: VoxelId): boolean {
 	const role = getVoxelNatureRole(id);
-	return role === 'grass' || role === 'leaf';
+	return role === 'grass' || role === 'leaf' || role === 'flower';
 }
 
 export function getNatureMaterialIds(role: NatureRole): VoxelId[] {
@@ -920,5 +928,7 @@ function normalizeNatureRole(value: unknown): NatureRole | null {
 		return null;
 	}
 
-	return value === 'grass' || value === 'leaf' || value === 'bark' ? value : null;
+	return value === 'grass' || value === 'leaf' || value === 'bark' || value === 'flower'
+		? value
+		: null;
 }

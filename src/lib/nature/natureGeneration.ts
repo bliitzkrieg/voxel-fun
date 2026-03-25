@@ -1,24 +1,30 @@
 import * as THREE from 'three';
 
+import { getNatureMaterialSet } from '$lib/nature/natureMaterials';
+import type {
+	NatureFlowerSettings,
+	NatureGrassHeightVariance,
+	NatureGrassSettings,
+	NatureTreeSettings
+} from '$lib/nature/natureTypes';
+import type { PlayerController } from '$lib/player/playerController';
 import { createVoxelCommandResult, type VoxelCommandResult } from '$lib/voxel/voxelCommands';
 import {
 	getNatureMaterialIds,
+	isNatureFlowerMaterial,
 	isNatureGrassMaterial,
 	isNatureLeafMaterial,
 	isNatureMaterial,
 	isWaterVoxelMaterial
 } from '$lib/voxel/voxelPalette';
 import type { VoxelHit } from '$lib/voxel/voxelRaycast';
-import type { VoxelWorld } from '$lib/voxel/world';
-import type { PlayerController } from '$lib/player/playerController';
 import type { VoxelBlock, WorldBox, WorldCoord } from '$lib/voxel/voxelTypes';
-import type {
-	NatureGrassHeightVariance,
-	NatureGrassSettings,
-	NatureTreeSettings
-} from '$lib/nature/natureTypes';
+import type { VoxelWorld } from '$lib/voxel/world';
 
 const MAX_GRASS_HEIGHT = 4;
+const FLOWER_MIN_STEM_HEIGHT = 2;
+const FLOWER_MAX_STEM_HEIGHT = 4;
+const MAX_FLOWER_HEIGHT = FLOWER_MAX_STEM_HEIGHT + 2;
 const GROUND_SEARCH_UP = 4;
 const GROUND_SEARCH_DOWN = 14;
 const TREE_SCALE = 2.5;
@@ -209,6 +215,96 @@ export function placeNatureTree(
 	return result;
 }
 
+export function paintNatureFlowers(
+	world: VoxelWorld,
+	player: PlayerController,
+	hit: VoxelHit | null,
+	settings: NatureFlowerSettings
+): VoxelCommandResult {
+	const anchor = resolveNatureGroundAnchor(world, hit);
+	const { flowerStemIds, flowerBloomIds } = getNatureMaterialSet();
+	const result = createVoxelCommandResult();
+
+	if (!anchor || flowerStemIds.length === 0 || flowerBloomIds.length === 0) {
+		return result;
+	}
+
+	const radius = settings.radius;
+	const radiusSq = (radius + 0.45) ** 2;
+	const brushSeed = settings.seedOffset * 29 + anchor.surfaceY * 17;
+	const clearedBlockIds = new Set<number>();
+	const removableBlockIds = new Set<number>();
+	const plannedBlocks = new Map<string, GeneratedNatureVoxel>();
+
+	clearNatureFlowerFootprint(world, anchor, radius, result, clearedBlockIds);
+
+	for (let dz = -radius; dz <= radius; dz += 1) {
+		for (let dx = -radius; dx <= radius; dx += 1) {
+			const distanceSq = dx * dx + dz * dz;
+
+			if (distanceSq > radiusSq) {
+				continue;
+			}
+
+			const x = anchor.x + dx;
+			const z = anchor.z + dz;
+			const columnAnchor = findGroundAnchorForColumn(world, x, z, anchor.surfaceY);
+
+			if (!columnAnchor) {
+				continue;
+			}
+
+			const falloff = Math.max(0, 1 - Math.sqrt(distanceSq) / (radius + 0.45));
+			const softenedFalloff = mix(0.24, 1, falloff);
+			const clusterNoise = hash01(Math.floor(x * 0.7), 0, Math.floor(z * 0.7), brushSeed);
+			const placementNoise = hash01(x, columnAnchor.surfaceY, z, brushSeed + 101);
+			const densityThreshold = clamp01(
+				settings.density * mix(0.48, 1.2, clusterNoise) * softenedFalloff
+			);
+
+			if (placementNoise > densityThreshold) {
+				continue;
+			}
+
+			const flowerBlocks = buildFlowerPlant({
+				anchor: columnAnchor,
+				stemMaterialIds: flowerStemIds,
+				bloomMaterialIds: flowerBloomIds,
+				seed: hashInt(x, columnAnchor.surfaceY, z, brushSeed + 211)
+			});
+
+			if (
+				flowerBlocks.length === 0 ||
+				!canQueueFlowerPlant(world, player, plannedBlocks, removableBlockIds, flowerBlocks)
+			) {
+				continue;
+			}
+
+			for (const block of flowerBlocks) {
+				plannedBlocks.set(worldCoordKey(block.origin), block);
+			}
+		}
+	}
+
+	for (const blockId of removableBlockIds) {
+		const removedBlock = world.removeBlockById(blockId);
+
+		if (removedBlock) {
+			recordChangedBlock(world, removedBlock, result);
+		}
+	}
+
+	for (const block of plannedBlocks.values()) {
+		const placedBlock = world.placeBlock(block.origin, 1, block.materialId);
+
+		if (placedBlock) {
+			recordChangedBlock(world, placedBlock, result);
+		}
+	}
+
+	return result;
+}
+
 function buildTreePlacement(
 	world: VoxelWorld,
 	player: PlayerController,
@@ -319,7 +415,8 @@ function buildTreePlacement(
 
 		if (
 			isNatureGrassMaterial(existingBlock.materialId) ||
-			isNatureLeafMaterial(existingBlock.materialId)
+			isNatureLeafMaterial(existingBlock.materialId) ||
+			isNatureFlowerMaterial(existingBlock.materialId)
 		) {
 			removableBlockIds.add(existingBlock.id);
 			continue;
@@ -645,6 +742,63 @@ function clearNatureGrassColumn(
 	}
 }
 
+function clearNatureFlowerFootprint(
+	world: VoxelWorld,
+	anchor: NatureGroundAnchor,
+	radius: number,
+	result: VoxelCommandResult,
+	affectedBlockIds: Set<number>
+): void {
+	const clearRadiusSq = (radius + 1.15) ** 2;
+
+	for (let dz = -radius - 1; dz <= radius + 1; dz += 1) {
+		for (let dx = -radius - 1; dx <= radius + 1; dx += 1) {
+			if (dx * dx + dz * dz > clearRadiusSq) {
+				continue;
+			}
+
+			const columnAnchor = findGroundAnchorForColumn(
+				world,
+				anchor.x + dx,
+				anchor.z + dz,
+				anchor.surfaceY
+			);
+
+			if (!columnAnchor) {
+				continue;
+			}
+
+			clearNatureFlowerColumn(world, columnAnchor, result, affectedBlockIds);
+		}
+	}
+}
+
+function clearNatureFlowerColumn(
+	world: VoxelWorld,
+	anchor: NatureGroundAnchor,
+	result: VoxelCommandResult,
+	affectedBlockIds: Set<number>
+): void {
+	for (let step = 1; step <= MAX_FLOWER_HEIGHT; step += 1) {
+		const flowerBlock = world.getBlockAt(anchor.x, anchor.surfaceY + step, anchor.z);
+
+		if (!flowerBlock || !isNatureFlowerMaterial(flowerBlock.materialId)) {
+			continue;
+		}
+
+		if (affectedBlockIds.has(flowerBlock.id)) {
+			continue;
+		}
+
+		affectedBlockIds.add(flowerBlock.id);
+		const removedBlock = world.removeBlockById(flowerBlock.id);
+
+		if (removedBlock) {
+			recordChangedBlock(world, removedBlock, result);
+		}
+	}
+}
+
 function canPlaceGrassColumn(
 	world: VoxelWorld,
 	player: PlayerController,
@@ -667,6 +821,115 @@ function canPlaceGrassColumn(
 	}
 
 	return true;
+}
+
+function buildFlowerPlant(input: {
+	anchor: NatureGroundAnchor;
+	stemMaterialIds: number[];
+	bloomMaterialIds: number[];
+	seed: number;
+}): GeneratedNatureVoxel[] {
+	const { anchor, stemMaterialIds, bloomMaterialIds, seed } = input;
+	const stemHeight = pickFlowerStemHeight(
+		hash01(anchor.x, anchor.surfaceY, anchor.z, seed + 17)
+	);
+	const blossomY = anchor.surfaceY + stemHeight + 1;
+	const stemMaterialId = pickMaterialId(
+		stemMaterialIds,
+		hash01(anchor.x, blossomY, anchor.z, seed + 31)
+	);
+	const bloomMaterialId = pickMaterialId(
+		bloomMaterialIds,
+		hash01(anchor.x, blossomY, anchor.z, seed + 43)
+	);
+	const blocks = new Map<string, GeneratedNatureVoxel>();
+
+	for (let step = 1; step <= stemHeight; step += 1) {
+		const origin = { x: anchor.x, y: anchor.surfaceY + step, z: anchor.z };
+		setGeneratedBlock(blocks, origin, stemMaterialId);
+	}
+
+	setGeneratedBlock(blocks, { x: anchor.x, y: blossomY, z: anchor.z }, bloomMaterialId);
+
+	const petalDirections = rotateCardinalDirections(Math.abs(seed) % 4);
+	const petalCountNoise = hash01(anchor.x, blossomY, anchor.z, seed + 59);
+	const petalCount = petalCountNoise < 0.28 ? 1 : petalCountNoise < 0.72 ? 2 : 3;
+
+	for (let index = 0; index < petalCount; index += 1) {
+		const direction = petalDirections[index];
+
+		if (!direction) {
+			continue;
+		}
+
+		setGeneratedBlock(
+			blocks,
+			{
+				x: anchor.x + direction.x,
+				y: blossomY,
+				z: anchor.z + direction.z
+			},
+			bloomMaterialId
+		);
+	}
+
+	if (hash01(anchor.x, blossomY, anchor.z, seed + 71) > 0.58) {
+		setGeneratedBlock(
+			blocks,
+			{
+				x: anchor.x,
+				y: blossomY + 1,
+				z: anchor.z
+			},
+			bloomMaterialId
+		);
+	}
+
+	return [...blocks.values()];
+}
+
+function canQueueFlowerPlant(
+	world: VoxelWorld,
+	player: PlayerController,
+	plannedBlocks: ReadonlyMap<string, GeneratedNatureVoxel>,
+	removableBlockIds: Set<number>,
+	flowerBlocks: ReadonlyArray<GeneratedNatureVoxel>
+): boolean {
+	for (const block of flowerBlocks) {
+		const key = worldCoordKey(block.origin);
+
+		if (
+			plannedBlocks.has(key) ||
+			!player.canPlaceVoxelAt(block.origin.x, block.origin.y, block.origin.z)
+		) {
+			return false;
+		}
+
+		const existingBlock = world.getBlockAt(block.origin.x, block.origin.y, block.origin.z);
+
+		if (!existingBlock) {
+			continue;
+		}
+
+		if (
+			!isNatureGrassMaterial(existingBlock.materialId) &&
+			!isNatureFlowerMaterial(existingBlock.materialId)
+		) {
+			return false;
+		}
+
+		removableBlockIds.add(existingBlock.id);
+	}
+
+	return true;
+}
+
+function pickFlowerStemHeight(noise: number): number {
+	return chooseWeightedHeight(noise, [
+		[FLOWER_MIN_STEM_HEIGHT, 0.24],
+		[FLOWER_MIN_STEM_HEIGHT + 1, 0.56],
+		[FLOWER_MAX_STEM_HEIGHT, 0.2]
+	]);
 }
 
 function isValidNatureGroundBlock(block: Pick<VoxelBlock, 'materialId'>): boolean {
@@ -840,6 +1103,19 @@ function pickCardinalDirection(seed: number): { x: number; z: number } {
 		{ x: 0, z: -1 }
 	];
 	return directions[Math.abs(seed) % directions.length] ?? directions[0]!;
+}
+
+function rotateCardinalDirections(offset: number): Array<{ x: number; z: number }> {
+	const directions = [
+		{ x: 1, z: 0 },
+		{ x: 0, z: 1 },
+		{ x: -1, z: 0 },
+		{ x: 0, z: -1 }
+	];
+
+	return directions.map(
+		(_, index) => directions[(index + offset) % directions.length] ?? directions[0]!
+	);
 }
 
 function worldCoordKey(origin: WorldCoord): string {

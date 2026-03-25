@@ -16,6 +16,8 @@ interface NatureMaterialSet {
 	grass: NatureMaterialDefinition[];
 	leaf: NatureMaterialDefinition[];
 	bark: NatureMaterialDefinition[];
+	flowerStem: NatureMaterialDefinition[];
+	flowerBloom: NatureMaterialDefinition[];
 }
 
 const NATURE_MATERIALS: NatureMaterialSet = {
@@ -35,6 +37,16 @@ const NATURE_MATERIALS: NatureMaterialSet = {
 		{ name: 'Nature Bark Dark', color: [0.18, 0.12, 0.08], natureRole: 'bark' },
 		{ name: 'Nature Bark Mid', color: [0.27, 0.18, 0.12], natureRole: 'bark' },
 		{ name: 'Nature Bark Light', color: [0.36, 0.26, 0.18], natureRole: 'bark' }
+	],
+	flowerStem: [
+		{ name: 'Nature Flower Stem Deep', color: [0.18, 0.34, 0.12], natureRole: 'flower' },
+		{ name: 'Nature Flower Stem Soft', color: [0.28, 0.45, 0.18], natureRole: 'flower' }
+	],
+	flowerBloom: [
+		{ name: 'Nature Flower Scarlet', color: [0.76, 0.21, 0.18], natureRole: 'flower' },
+		{ name: 'Nature Flower Cobalt', color: [0.2, 0.38, 0.82], natureRole: 'flower' },
+		{ name: 'Nature Flower Amber', color: [0.92, 0.52, 0.14], natureRole: 'flower' },
+		{ name: 'Nature Flower Violet', color: [0.56, 0.28, 0.76], natureRole: 'flower' }
 	]
 };
 
@@ -42,23 +54,49 @@ export function ensureNatureMaterials(): {
 	grassIds: number[];
 	leafIds: number[];
 	barkIds: number[];
+	flowerStemIds: number[];
+	flowerBloomIds: number[];
+	flowerIds: number[];
 } {
 	const grassIds = ensureNatureMaterialGroup(NATURE_MATERIALS.grass).map((entry) => entry.id);
 	const leafIds = ensureNatureMaterialGroup(NATURE_MATERIALS.leaf).map((entry) => entry.id);
 	const barkIds = ensureNatureMaterialGroup(NATURE_MATERIALS.bark).map((entry) => entry.id);
+	const flowerStemIds = ensureNatureMaterialGroup(NATURE_MATERIALS.flowerStem).map(
+		(entry) => entry.id
+	);
+	const flowerBloomIds = ensureNatureMaterialGroup(NATURE_MATERIALS.flowerBloom).map(
+		(entry) => entry.id
+	);
 
-	return { grassIds, leafIds, barkIds };
+	return {
+		grassIds,
+		leafIds,
+		barkIds,
+		flowerStemIds,
+		flowerBloomIds,
+		flowerIds: [...flowerStemIds, ...flowerBloomIds]
+	};
 }
 
 export function getNatureMaterialSet(): {
 	grassIds: number[];
 	leafIds: number[];
 	barkIds: number[];
+	flowerStemIds: number[];
+	flowerBloomIds: number[];
+	flowerIds: number[];
 } {
+	const ensured = ensureNatureMaterials();
+
 	return {
-		grassIds: getNatureMaterialIds('grass'),
-		leafIds: getNatureMaterialIds('leaf'),
-		barkIds: getNatureMaterialIds('bark')
+		grassIds: ensured.grassIds.length > 0 ? ensured.grassIds : getNatureMaterialIds('grass'),
+		leafIds: ensured.leafIds.length > 0 ? ensured.leafIds : getNatureMaterialIds('leaf'),
+		barkIds: ensured.barkIds.length > 0 ? ensured.barkIds : getNatureMaterialIds('bark'),
+		flowerStemIds:
+			ensured.flowerStemIds.length > 0 ? ensured.flowerStemIds : getNatureMaterialIds('flower'),
+		flowerBloomIds:
+			ensured.flowerBloomIds.length > 0 ? ensured.flowerBloomIds : getNatureMaterialIds('flower'),
+		flowerIds: ensured.flowerIds.length > 0 ? ensured.flowerIds : getNatureMaterialIds('flower')
 	};
 }
 

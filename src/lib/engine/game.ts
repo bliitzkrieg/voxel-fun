@@ -14,6 +14,7 @@ import {
 } from '$lib/engine/voxelSurfaceMaterial';
 import { ensureNatureMaterials } from '$lib/nature/natureMaterials';
 import type {
+	NatureFlowerSettings,
 	NatureGrassSettings,
 	NaturePreset,
 	NatureTreeSettings
@@ -30,6 +31,7 @@ import {
 	getNatureUiState,
 	syncNatureTool,
 	toggleNaturePanel,
+	updateNatureFlowerSettings as updateNatureFlowerUiSettings,
 	updateNatureGrassSettings as updateNatureGrassUiSettings,
 	updateNatureTreeSettings as updateNatureTreeUiSettings
 } from '$lib/ui/natureState';
@@ -466,8 +468,20 @@ export class Game {
 		closeMaterialManager();
 		closePropManager();
 		closeNaturePanel();
-		this.editor.startNatureTool(preset === 'grass' ? 'nature-grass' : 'nature-tree');
-		syncNatureTool(preset === 'grass' ? 'grass-paint' : 'tree-place');
+		switch (preset) {
+			case 'grass':
+				this.editor.startNatureTool('nature-grass');
+				syncNatureTool('grass-paint');
+				break;
+			case 'flowers':
+				this.editor.startNatureTool('nature-flower');
+				syncNatureTool('flower-paint');
+				break;
+			default:
+				this.editor.startNatureTool('nature-tree');
+				syncNatureTool('tree-place');
+				break;
+		}
 		this.updateViewportState();
 		return true;
 	}
@@ -480,6 +494,10 @@ export class Game {
 
 	updateNatureGrassSettings(input: Partial<NatureGrassSettings>): void {
 		updateNatureGrassUiSettings(input);
+	}
+
+	updateNatureFlowerSettings(input: Partial<NatureFlowerSettings>): void {
+		updateNatureFlowerUiSettings(input);
 	}
 
 	updateNatureTreeSettings(input: Partial<NatureTreeSettings>): void {
@@ -712,6 +730,10 @@ export class Game {
 
 		if (!ignoreToggleHotkey && !propPlacementActive && this.input.consumeKeyPress('KeyG')) {
 			this.activateNaturePreset('grass');
+		}
+
+		if (!ignoreToggleHotkey && !propPlacementActive && this.input.consumeKeyPress('KeyF')) {
+			this.activateNaturePreset('flowers');
 		}
 
 		if (!ignoreToggleHotkey && !propPlacementActive && this.input.consumeKeyPress('KeyT')) {

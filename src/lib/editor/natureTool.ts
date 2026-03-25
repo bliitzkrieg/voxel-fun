@@ -1,5 +1,6 @@
 import type { EditorTool, EditorToolContext } from '$lib/editor/editorTool';
 import {
+	paintNatureFlowers,
 	paintNatureGrass,
 	placeNatureTree,
 	resolveNatureGroundAnchor
@@ -51,7 +52,10 @@ export class NatureTool implements EditorTool {
 			return;
 		}
 
-		const strokeKey = `${anchor.x},${anchor.surfaceY},${anchor.z}:${natureState.grassSettings.radius}:${natureState.grassSettings.density}:${natureState.grassSettings.heightVariance}:${natureState.grassSettings.seedOffset}`;
+		const strokeKey =
+			context.editorState.activeTool === 'nature-flower'
+				? `${anchor.x},${anchor.surfaceY},${anchor.z}:flower:${natureState.flowerSettings.radius}:${natureState.flowerSettings.density}:${natureState.flowerSettings.seedOffset}`
+				: `${anchor.x},${anchor.surfaceY},${anchor.z}:grass:${natureState.grassSettings.radius}:${natureState.grassSettings.density}:${natureState.grassSettings.heightVariance}:${natureState.grassSettings.seedOffset}`;
 
 		if (strokeKey === this.lastAppliedKey) {
 			return;
@@ -59,7 +63,10 @@ export class NatureTool implements EditorTool {
 
 		this.lastAppliedKey = strokeKey;
 
-		const result = paintNatureGrass(context.world, context.player, hit, natureState.grassSettings);
+		const result =
+			context.editorState.activeTool === 'nature-flower'
+				? paintNatureFlowers(context.world, context.player, hit, natureState.flowerSettings)
+				: paintNatureGrass(context.world, context.player, hit, natureState.grassSettings);
 
 		if (result.changedVoxelCount > 0) {
 			context.commit(result);

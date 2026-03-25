@@ -1,7 +1,7 @@
-export type NaturePreset = 'grass' | 'trees';
-export type NatureActiveTool = 'grass-paint' | 'tree-place';
-export type NatureEditorTool = 'nature-grass' | 'nature-tree';
-export type NatureRole = 'grass' | 'leaf' | 'bark';
+export type NaturePreset = 'grass' | 'trees' | 'flowers';
+export type NatureActiveTool = 'grass-paint' | 'tree-place' | 'flower-paint';
+export type NatureEditorTool = 'nature-grass' | 'nature-tree' | 'nature-flower';
+export type NatureRole = 'grass' | 'leaf' | 'bark' | 'flower';
 export type NatureGrassHeightVariance = 'low' | 'medium' | 'high';
 export type NatureTreeSize = 'small' | 'medium' | 'large';
 
@@ -17,6 +17,12 @@ export interface NatureTreeSettings {
 	seedOffset: number;
 }
 
+export interface NatureFlowerSettings {
+	radius: number;
+	density: number;
+	seedOffset: number;
+}
+
 export const DEFAULT_NATURE_GRASS_SETTINGS: NatureGrassSettings = {
 	radius: 4,
 	density: 0.86,
@@ -29,14 +35,43 @@ export const DEFAULT_NATURE_TREE_SETTINGS: NatureTreeSettings = {
 	seedOffset: 0
 };
 
+export const DEFAULT_NATURE_FLOWER_SETTINGS: NatureFlowerSettings = {
+	radius: 4,
+	density: 0.34,
+	seedOffset: 0
+};
+
 export function getNatureToolForPreset(preset: NaturePreset): NatureActiveTool {
-	return preset === 'grass' ? 'grass-paint' : 'tree-place';
+	switch (preset) {
+		case 'grass':
+			return 'grass-paint';
+		case 'flowers':
+			return 'flower-paint';
+		default:
+			return 'tree-place';
+	}
 }
 
 export function getNatureEditorToolForPreset(preset: NaturePreset): NatureEditorTool {
-	return preset === 'grass' ? 'nature-grass' : 'nature-tree';
+	switch (preset) {
+		case 'grass':
+			return 'nature-grass';
+		case 'flowers':
+			return 'nature-flower';
+		default:
+			return 'nature-tree';
+	}
 }
 
 export function getNaturePresetForTool(tool: NatureActiveTool | NatureEditorTool): NaturePreset {
-	return tool === 'grass-paint' || tool === 'nature-grass' ? 'grass' : 'trees';
+	switch (tool) {
+		case 'grass-paint':
+		case 'nature-grass':
+			return 'grass';
+		case 'flower-paint':
+		case 'nature-flower':
+			return 'flowers';
+		default:
+			return 'trees';
+	}
 }

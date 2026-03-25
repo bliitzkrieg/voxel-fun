@@ -20,6 +20,7 @@
 		type PropUiState
 	} from '$lib/ui/propManagerState';
 	import {
+		DEFAULT_NATURE_FLOWER_SETTINGS,
 		DEFAULT_NATURE_GRASS_SETTINGS,
 		DEFAULT_NATURE_TREE_SETTINGS
 	} from '$lib/nature/natureTypes';
@@ -58,6 +59,7 @@
 		activePreset: 'grass',
 		activeTool: null,
 		grassSettings: { ...DEFAULT_NATURE_GRASS_SETTINGS },
+		flowerSettings: { ...DEFAULT_NATURE_FLOWER_SETTINGS },
 		treeSettings: { ...DEFAULT_NATURE_TREE_SETTINGS }
 	});
 	let propLibraryState = $state<PropLibraryState>({ props: [] });
@@ -402,6 +404,36 @@
 		game?.updateNatureGrassSettings({ seedOffset });
 	}
 
+	function handleNatureFlowerRadiusChange(value: string): void {
+		const radius = Number.parseInt(value, 10);
+
+		if (!Number.isFinite(radius)) {
+			return;
+		}
+
+		game?.updateNatureFlowerSettings({ radius });
+	}
+
+	function handleNatureFlowerDensityChange(value: string): void {
+		const density = Number.parseFloat(value);
+
+		if (!Number.isFinite(density)) {
+			return;
+		}
+
+		game?.updateNatureFlowerSettings({ density });
+	}
+
+	function handleNatureFlowerSeedChange(value: string): void {
+		const seedOffset = Number.parseInt(value, 10);
+
+		if (!Number.isFinite(seedOffset)) {
+			return;
+		}
+
+		game?.updateNatureFlowerSettings({ seedOffset });
+	}
+
 	function handleNatureTreeSizeChange(value: string): void {
 		if (value !== 'small' && value !== 'medium' && value !== 'large') {
 			return;
@@ -483,11 +515,25 @@
 	}
 
 	function getNaturePresetTitle(preset: NaturePreset): string {
-		return preset === 'grass' ? 'Grass Brush' : 'Tree Generator';
+		switch (preset) {
+			case 'grass':
+				return 'Grass Brush';
+			case 'flowers':
+				return 'Flower Brush';
+			default:
+				return 'Tree Generator';
+		}
 	}
 
 	function getNatureToolTitle(): string {
-		return natureUiState.activeTool === 'grass-paint' ? 'Grass Painting' : 'Tree Planting';
+		switch (natureUiState.activeTool) {
+			case 'grass-paint':
+				return 'Grass Painting';
+			case 'flower-paint':
+				return 'Flower Painting';
+			default:
+				return 'Tree Planting';
+		}
 	}
 </script>
 
@@ -558,6 +604,8 @@
 				<span class="dock-copy">Day/Night</span>
 				<span class="keycap">G</span>
 				<span class="dock-copy">Grass</span>
+				<span class="keycap">F</span>
+				<span class="dock-copy">Flowers</span>
 				<span class="keycap">T</span>
 				<span class="dock-copy">Trees</span>
 				<span class="keycap">M</span>
@@ -899,8 +947,8 @@
 						<div class="nature-panel-kicker">Ground Cover And Canopy Kit</div>
 						<h2 class="nature-panel-title">Nature</h2>
 						<p class="nature-panel-copy">
-							Paint sparse teardown-style grass across exposed ground or stamp a full procedural
-							tree with rough bark, upward branches, and layered leaf scatter.
+							Paint sparse teardown-style grass, scatter colorful procedural flowers, or stamp a
+							full tree with rough bark, upward branches, and layered leaf scatter.
 						</p>
 					</div>
 
@@ -1005,6 +1053,47 @@
 									Start Tree Tool
 								</button>
 							</article>
+
+							<article
+								class:nature-card-active={natureUiState.activePreset === 'flowers'}
+								class="nature-card"
+							>
+								<button
+									class="nature-card-main"
+									type="button"
+									onclick={() => handleSelectNaturePreset('flowers')}
+								>
+									<div class="nature-card-art nature-card-art-flowers" aria-hidden="true">
+										<span class="nature-flower-stem nature-flower-stem-left"></span>
+										<span class="nature-flower-stem nature-flower-stem-center"></span>
+										<span class="nature-flower-stem nature-flower-stem-right"></span>
+										<span class="nature-flower-bloom nature-flower-bloom-red"></span>
+										<span class="nature-flower-bloom nature-flower-bloom-blue"></span>
+										<span class="nature-flower-bloom nature-flower-bloom-orange"></span>
+										<span class="nature-flower-bloom nature-flower-bloom-purple"></span>
+									</div>
+									<div class="nature-card-copy">
+										<div class="nature-card-kicker">Brush Preset</div>
+										<div class="nature-card-title">Flowers</div>
+										<p class="nature-card-text">
+											Plants low procedural flower clusters with colored blossoms in red, blue,
+											orange, and purple over or through existing grass.
+										</p>
+									</div>
+								</button>
+								<div class="nature-card-meta">
+									<span>Painted clusters</span>
+									<span>Colored blossoms</span>
+									<span>Grass-friendly</span>
+								</div>
+								<button
+									class="nature-card-activate"
+									type="button"
+									onclick={() => handleActivateNaturePreset('flowers')}
+								>
+									Start Flower Brush
+								</button>
+							</article>
 						</div>
 					</section>
 
@@ -1017,7 +1106,11 @@
 								</div>
 							</div>
 							<div class="nature-settings-badge">
-								{natureUiState.activePreset === 'grass' ? 'Patch painter' : 'Procedural stamp'}
+								{natureUiState.activePreset === 'grass'
+									? 'Patch painter'
+									: natureUiState.activePreset === 'flowers'
+										? 'Bloom scatter'
+										: 'Procedural stamp'}
 							</div>
 						</div>
 
@@ -1111,6 +1204,72 @@
 									existing grass voxels without carving into terrain.
 								</div>
 							</div>
+						{:else if natureUiState.activePreset === 'flowers'}
+							{@const flowerSettings = natureUiState.flowerSettings}
+
+							<div class="nature-settings-body">
+								<label class="nature-field">
+									<div class="nature-field-row">
+										<span class="nature-field-label">Brush Radius</span>
+										<span class="nature-field-value">{flowerSettings.radius}</span>
+									</div>
+									<input
+										class="nature-range"
+										type="range"
+										min="1"
+										max="10"
+										step="1"
+										value={flowerSettings.radius}
+										oninput={(event) =>
+											handleNatureFlowerRadiusChange(
+												(event.currentTarget as HTMLInputElement).value
+											)}
+									/>
+								</label>
+
+								<label class="nature-field">
+									<div class="nature-field-row">
+										<span class="nature-field-label">Bloom Density</span>
+										<span class="nature-field-value">
+											{formatNatureDensity(flowerSettings.density)}
+										</span>
+									</div>
+									<input
+										class="nature-range"
+										type="range"
+										min="0.05"
+										max="1"
+										step="0.01"
+										value={flowerSettings.density}
+										oninput={(event) =>
+											handleNatureFlowerDensityChange(
+												(event.currentTarget as HTMLInputElement).value
+											)}
+									/>
+								</label>
+
+								<label class="nature-field">
+									<div class="nature-field-row">
+										<span class="nature-field-label">Seed Offset</span>
+										<span class="nature-field-value">{flowerSettings.seedOffset}</span>
+									</div>
+									<input
+										class="nature-number"
+										type="number"
+										min="0"
+										max="9999"
+										step="1"
+										value={flowerSettings.seedOffset}
+										oninput={(event) =>
+											handleNatureFlowerSeedChange((event.currentTarget as HTMLInputElement).value)}
+									/>
+								</label>
+
+								<div class="nature-summary">
+									Flowers repaint their own stems and blossoms cleanly, and they can grow through
+									grass while leaving the surrounding ground untouched.
+								</div>
+							</div>
 						{:else}
 							{@const treeSettings = natureUiState.treeSettings}
 							{@const activeTreeSize =
@@ -1168,7 +1327,11 @@
 								type="button"
 								onclick={() => handleActivateNaturePreset(natureUiState.activePreset ?? 'grass')}
 							>
-								{natureUiState.activePreset === 'grass' ? 'Use Grass Brush' : 'Use Tree Tool'}
+								{natureUiState.activePreset === 'grass'
+									? 'Use Grass Brush'
+									: natureUiState.activePreset === 'flowers'
+										? 'Use Flower Brush'
+										: 'Use Tree Tool'}
 							</button>
 						</div>
 					</section>
@@ -1313,12 +1476,12 @@
 			<div class="nature-tool-chip">Nature Live</div>
 			<div class="nature-tool-title">{getNatureToolTitle()}</div>
 			<div class="nature-tool-row">
-				{#if natureUiState.activeTool === 'grass-paint'}
-					<span class="keycap">LMB Drag</span>
-					<span class="dock-copy">Paint</span>
-				{:else}
+				{#if natureUiState.activeTool === 'tree-place'}
 					<span class="keycap">LMB</span>
 					<span class="dock-copy">Plant</span>
+				{:else}
+					<span class="keycap">LMB Drag</span>
+					<span class="dock-copy">Paint</span>
 				{/if}
 				<span class="keycap">N</span>
 				<span class="dock-copy">Tune</span>
@@ -2431,7 +2594,7 @@
 
 	.nature-card-grid {
 		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
+		grid-template-columns: repeat(3, minmax(0, 1fr));
 		gap: 14px;
 		min-height: 0;
 	}
@@ -2604,6 +2767,76 @@
 		width: 72px;
 		height: 50px;
 		background: linear-gradient(180deg, rgba(154, 195, 96, 0.94), rgba(69, 108, 46, 0.98));
+	}
+
+	.nature-card-art-flowers::before {
+		content: '';
+		position: absolute;
+		inset: auto 0 18px;
+		height: 20px;
+		background:
+			radial-gradient(circle at 24% 50%, rgba(97, 146, 67, 0.54), transparent 38%),
+			radial-gradient(circle at 50% 50%, rgba(110, 163, 73, 0.58), transparent 38%),
+			radial-gradient(circle at 78% 50%, rgba(88, 132, 60, 0.54), transparent 38%);
+		filter: blur(7px);
+	}
+
+	.nature-flower-stem {
+		position: absolute;
+		bottom: 34px;
+		width: 8px;
+		border-radius: 999px;
+		background: linear-gradient(180deg, rgba(126, 182, 88, 0.96), rgba(54, 104, 39, 0.98));
+		box-shadow: 0 0 14px rgba(76, 136, 54, 0.16);
+	}
+
+	.nature-flower-stem-left {
+		left: 26%;
+		height: 48px;
+		transform: rotate(-7deg);
+	}
+
+	.nature-flower-stem-center {
+		left: calc(50% - 4px);
+		height: 66px;
+	}
+
+	.nature-flower-stem-right {
+		right: 28%;
+		height: 54px;
+		transform: rotate(7deg);
+	}
+
+	.nature-flower-bloom {
+		position: absolute;
+		width: 20px;
+		height: 20px;
+		border-radius: 999px;
+		box-shadow: 0 0 16px rgba(255, 255, 255, 0.08);
+	}
+
+	.nature-flower-bloom-red {
+		left: 22%;
+		top: 62px;
+		background: radial-gradient(circle at 35% 35%, #ffccc5, #cb3e35 62%, #8e251f 100%);
+	}
+
+	.nature-flower-bloom-blue {
+		left: calc(50% - 10px);
+		top: 44px;
+		background: radial-gradient(circle at 35% 35%, #d4e4ff, #4d76e3 62%, #24408a 100%);
+	}
+
+	.nature-flower-bloom-orange {
+		right: 22%;
+		top: 70px;
+		background: radial-gradient(circle at 35% 35%, #ffe2c1, #e5882b 62%, #9b4f12 100%);
+	}
+
+	.nature-flower-bloom-purple {
+		left: calc(50% + 18px);
+		top: 82px;
+		background: radial-gradient(circle at 35% 35%, #efd5ff, #8e53db 62%, #51207f 100%);
 	}
 
 	.nature-card-copy {

@@ -12,6 +12,7 @@ export type EditorToolType =
 	| 'box-carve'
 	| 'box-paint'
 	| 'nature-grass'
+	| 'nature-flower'
 	| 'nature-tree';
 
 export type EditorMode = 'add' | 'remove' | 'paint';
@@ -127,6 +128,8 @@ export function getEditorToolLabel(tool: EditorToolType): string {
 			return 'Box Paint';
 		case 'nature-grass':
 			return 'Nature Grass';
+		case 'nature-flower':
+			return 'Nature Flowers';
 		case 'nature-tree':
 			return 'Nature Tree';
 	}
