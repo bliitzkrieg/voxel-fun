@@ -12,12 +12,27 @@ import {
 	syncVoxelSurfaceMaterial,
 	type VoxelSurfaceMaterial
 } from '$lib/engine/voxelSurfaceMaterial';
+import { ensureNatureMaterials } from '$lib/nature/natureMaterials';
+import type {
+	NatureGrassSettings,
+	NaturePreset,
+	NatureTreeSettings
+} from '$lib/nature/natureTypes';
 import { createVoxelWaterMaterial, type WaterShaderMaterial } from '$lib/engine/waterMaterial';
 import {
 	closeMaterialManager,
 	getMaterialManagerUiState,
 	openMaterialManager
 } from '$lib/ui/materialManagerState';
+import {
+	clearNatureTool,
+	closeNaturePanel,
+	getNatureUiState,
+	syncNatureTool,
+	toggleNaturePanel,
+	updateNatureGrassSettings as updateNatureGrassUiSettings,
+	updateNatureTreeSettings as updateNatureTreeUiSettings
+} from '$lib/ui/natureState';
 import { closePropManager, getPropUiState, openPropManager } from '$lib/ui/propManagerState';
 import { PlayerController } from '$lib/player/playerController';
 import { ChunkMesh } from '$lib/voxel/chunkMesh';
@@ -92,6 +107,7 @@ export class Game {
 	private lastDirtyChunkCount = 0;
 	private autoSaveHandle: number | null = null;
 	private materialManagerWasOpen = false;
+	private naturePanelWasOpen = false;
 	private propManagerWasOpen = false;
 	private propPlacementWasActive = false;
 
@@ -156,7 +172,9 @@ export class Game {
 		this.stats = new DebugStats(this.container);
 
 		closeMaterialManager();
+		closeNaturePanel();
 		closePropManager();
+		clearNatureTool();
 		this.loadInitialWorld();
 		this.player.teleport(16 * DEFAULT_VOXEL_SIZE, 1 * DEFAULT_VOXEL_SIZE, 11 * DEFAULT_VOXEL_SIZE);
 		this.player.setLookAngles(Math.PI, -0.05);
@@ -246,6 +264,7 @@ export class Game {
 		this.scheduleWorldSave(changedChunkKeys.size > 0);
 
 		this.updateViewportState();
+		this.syncNatureToolState();
 		this.lastDirtyChunkCount = Math.max(
 			this.pendingChunkSyncKeys.size,
 			this.world.getDirtyChunks().length
@@ -442,12 +461,39 @@ export class Game {
 		return true;
 	}
 
+	activateNaturePreset(preset: NaturePreset): boolean {
+		this.ensureNaturePalette();
+		closeMaterialManager();
+		closePropManager();
+		closeNaturePanel();
+		this.editor.startNatureTool(preset === 'grass' ? 'nature-grass' : 'nature-tree');
+		syncNatureTool(preset === 'grass' ? 'grass-paint' : 'tree-place');
+		this.updateViewportState();
+		return true;
+	}
+
+	cancelNatureTool(): void {
+		this.editor.cancelNatureTool();
+		clearNatureTool();
+		this.updateViewportState();
+	}
+
+	updateNatureGrassSettings(input: Partial<NatureGrassSettings>): void {
+		updateNatureGrassUiSettings(input);
+	}
+
+	updateNatureTreeSettings(input: Partial<NatureTreeSettings>): void {
+		updateNatureTreeUiSettings(input);
+	}
+
 	startPropPlacement(propId: number): boolean {
+		this.cancelNatureTool();
 		const started = this.editor.startPropPlacement(propId);
 
 		if (started) {
 			closeMaterialManager();
 			closePropManager();
+			closeNaturePanel();
 			this.updateViewportState();
 		}
 
@@ -500,16 +546,24 @@ export class Game {
 	private updateViewportState(): void {
 		const crosshair = this.container.parentElement?.querySelector('.crosshair');
 		const materialManagerOpen = getMaterialManagerUiState().open;
+		const naturePanelOpen = getNatureUiState().open;
 		const propUiState = getPropUiState();
 		const hideReticle =
 			this.editor.state.enabled ||
 			materialManagerOpen ||
+			naturePanelOpen ||
 			propUiState.managerOpen ||
 			propUiState.placementActive;
 		const suppressPointerLock =
-			materialManagerOpen || propUiState.managerOpen || propUiState.placementActive;
+			materialManagerOpen ||
+			naturePanelOpen ||
+			propUiState.managerOpen ||
+			propUiState.placementActive;
 		const enablePlacementFreeLook =
-			propUiState.placementActive && !materialManagerOpen && !propUiState.managerOpen;
+			propUiState.placementActive &&
+			!materialManagerOpen &&
+			!naturePanelOpen &&
+			!propUiState.managerOpen;
 
 		this.input.setPointerLockSuppressed(suppressPointerLock);
 		this.input.setFreeLookEnabled(enablePlacementFreeLook && !this.editor.isTransformDragging());
@@ -581,6 +635,7 @@ export class Game {
 			return false;
 		}
 
+		this.ensureNaturePalette();
 		this.emissiveLightManager.invalidateCandidates();
 		this.editor.ensureSelectedMaterialValid();
 		this.editor.resetTransientState();
@@ -633,33 +688,31 @@ export class Game {
 
 	private handleOverlayHotkeys(): void {
 		const materialManagerOpen = getMaterialManagerUiState().open;
+		const naturePanelOpen = getNatureUiState().open;
 		const propUiState = getPropUiState();
 		const propManagerOpen = propUiState.managerOpen;
 		const propPlacementActive = propUiState.placementActive;
-		const anyManagerOpen = materialManagerOpen || propManagerOpen;
 		const ignoreToggleHotkey = isTextInputElement(document.activeElement);
 
 		if (!ignoreToggleHotkey && this.input.consumeKeyPress('KeyL')) {
 			this.toggleTimeOfDay();
 		}
 
-		if (
-			!ignoreToggleHotkey &&
-			!anyManagerOpen &&
-			!propPlacementActive &&
-			this.input.consumeKeyPress('KeyM')
-		) {
+		if (!ignoreToggleHotkey && !propPlacementActive && this.input.consumeKeyPress('KeyM')) {
+			closeNaturePanel();
 			closePropManager();
 			openMaterialManager();
 		}
 
-		if (
-			!ignoreToggleHotkey &&
-			!anyManagerOpen &&
-			!propPlacementActive &&
-			this.input.consumeKeyPress('KeyP')
-		) {
+		if (!ignoreToggleHotkey && !propPlacementActive && this.input.consumeKeyPress('KeyN')) {
 			closeMaterialManager();
+			closePropManager();
+			toggleNaturePanel();
+		}
+
+		if (!ignoreToggleHotkey && !propPlacementActive && this.input.consumeKeyPress('KeyP')) {
+			closeMaterialManager();
+			closeNaturePanel();
 			openPropManager();
 		}
 
@@ -668,21 +721,28 @@ export class Game {
 				closeMaterialManager();
 			}
 
+			if (naturePanelOpen) {
+				closeNaturePanel();
+			}
+
 			if (propManagerOpen) {
 				closePropManager();
 			}
 		}
 
 		const nextMaterialManagerOpen = getMaterialManagerUiState().open;
+		const nextNaturePanelOpen = getNatureUiState().open;
 		const nextPropUiState = getPropUiState();
 		const nextPropManagerOpen = nextPropUiState.managerOpen;
 		const nextPropPlacementActive = nextPropUiState.placementActive;
 		const anyOverlayJustOpened =
 			(nextMaterialManagerOpen && !this.materialManagerWasOpen) ||
+			(nextNaturePanelOpen && !this.naturePanelWasOpen) ||
 			(nextPropManagerOpen && !this.propManagerWasOpen) ||
 			(nextPropPlacementActive && !this.propPlacementWasActive);
 		const anyOverlayJustClosed =
 			(!nextMaterialManagerOpen && this.materialManagerWasOpen) ||
+			(!nextNaturePanelOpen && this.naturePanelWasOpen) ||
 			(!nextPropManagerOpen && this.propManagerWasOpen) ||
 			(!nextPropPlacementActive && this.propPlacementWasActive);
 
@@ -696,6 +756,7 @@ export class Game {
 		}
 
 		this.materialManagerWasOpen = nextMaterialManagerOpen;
+		this.naturePanelWasOpen = nextNaturePanelOpen;
 		this.propManagerWasOpen = nextPropManagerOpen;
 		this.propPlacementWasActive = nextPropPlacementActive;
 	}
@@ -853,10 +914,19 @@ export class Game {
 				isWater: material.isWater ?? false,
 				emitsLight: material.emitsLight ?? false,
 				lightTint: [...(material.lightTint ?? material.color)] as [number, number, number],
+				natureRole: material.natureRole,
 				archived: material.archived
 			})),
 			hotbar: [...(snapshot?.hotbar ?? [])]
 		};
+	}
+
+	private ensureNaturePalette(): void {
+		ensureNatureMaterials();
+	}
+
+	private syncNatureToolState(): void {
+		syncNatureTool(this.editor.getNatureToolType());
 	}
 
 	private extractPropLibraryState(
@@ -891,6 +961,7 @@ function restoreSnapshotClone(state: SerializedVoxelPaletteState): SerializedVox
 			isWater: material.isWater ?? false,
 			emitsLight: material.emitsLight ?? false,
 			lightTint: [...(material.lightTint ?? material.color)] as [number, number, number],
+			natureRole: material.natureRole,
 			archived: material.archived
 		})),
 		hotbar: [...state.hotbar]

@@ -10,7 +10,9 @@ export type EditorToolType =
 	| 'box-fill'
 	| 'box-hollow'
 	| 'box-carve'
-	| 'box-paint';
+	| 'box-paint'
+	| 'nature-grass'
+	| 'nature-tree';
 
 export type EditorMode = 'add' | 'remove' | 'paint';
 export type BoxToolMode = 'solid' | 'hollow' | 'carve' | 'paint';
@@ -123,5 +125,9 @@ export function getEditorToolLabel(tool: EditorToolType): string {
 			return 'Box Carve';
 		case 'box-paint':
 			return 'Box Paint';
+		case 'nature-grass':
+			return 'Nature Grass';
+		case 'nature-tree':
+			return 'Nature Tree';
 	}
 }

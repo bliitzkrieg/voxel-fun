@@ -12,10 +12,18 @@ import {
 } from '$lib/editor/editorState';
 import { BoxTool } from '$lib/editor/boxTool';
 import { BrushTool } from '$lib/editor/brushTool';
+import { NatureTool } from '$lib/editor/natureTool';
 import type { EditorTool, EditorToolContext } from '$lib/editor/editorTool';
 import { createPreviewBox, getToolTargetCoord } from '$lib/editor/editorTargets';
 import { InputState } from '$lib/engine/input';
+import {
+	buildNatureTreePreview,
+	resolveNatureGroundAnchor,
+	type NatureTreePreview
+} from '$lib/nature/natureGeneration';
+import type { NatureActiveTool, NatureEditorTool } from '$lib/nature/natureTypes';
 import { PlayerController } from '$lib/player/playerController';
+import { getNatureUiState } from '$lib/ui/natureState';
 import {
 	clearPropPlacement,
 	openPropManager,
@@ -75,6 +83,8 @@ const PAINT_COLOR = new THREE.Color('#4dc9ff');
 const SELECT_COLOR = new THREE.Color('#ffd84a');
 const PROP_VALID_COLOR = new THREE.Color('#5ef0ff');
 const PROP_INVALID_COLOR = new THREE.Color('#ff6b57');
+const NATURE_PREVIEW_COLOR = new THREE.Color('#8fd66b');
+const NATURE_INVALID_COLOR = new THREE.Color('#ff8667');
 
 type WorldSnapshot = ReturnType<VoxelWorld['getBlocks']>;
 type PropInstanceSnapshot = ReturnType<VoxelWorld['getPropInstances']>;
@@ -100,6 +110,7 @@ export class EditorController {
 
 	private readonly boxTool = new BoxTool();
 	private readonly brushTool = new BrushTool();
+	private readonly natureTool = new NatureTool();
 	private readonly rayDirection = new THREE.Vector3();
 	private readonly interactionCameraPosition = new THREE.Vector3();
 	private readonly interactionRayDirection = new THREE.Vector3();
@@ -139,6 +150,41 @@ export class EditorController {
 	private readonly propPlacementEdgesGeometry = new THREE.EdgesGeometry(
 		this.propPlacementBoxGeometry
 	);
+	private readonly natureBrushRoot = new THREE.Group();
+	private readonly natureBrushFillMaterial = new THREE.MeshBasicMaterial({
+		color: NATURE_PREVIEW_COLOR,
+		transparent: true,
+		opacity: 0.16,
+		depthWrite: false,
+		depthTest: false
+	});
+	private readonly natureBrushRingMaterial = new THREE.MeshBasicMaterial({
+		color: NATURE_PREVIEW_COLOR,
+		transparent: true,
+		opacity: 0.84,
+		depthWrite: false,
+		depthTest: false
+	});
+	private readonly natureBrushFillGeometry = new THREE.CircleGeometry(1, 40);
+	private readonly natureBrushRingGeometry = new THREE.RingGeometry(0.94, 1, 48);
+	private readonly natureTreePreviewRoot = new THREE.Group();
+	private readonly natureTreePreviewFillMaterial = new THREE.MeshBasicMaterial({
+		color: NATURE_PREVIEW_COLOR,
+		transparent: true,
+		opacity: 0.16,
+		depthWrite: false,
+		depthTest: false
+	});
+	private readonly natureTreePreviewWireMaterial = new THREE.LineBasicMaterial({
+		color: NATURE_PREVIEW_COLOR,
+		transparent: true,
+		opacity: 0.9,
+		depthTest: false
+	});
+	private readonly natureTreePreviewBoxGeometry = new THREE.BoxGeometry(1, 1, 1);
+	private readonly natureTreePreviewEdgesGeometry = new THREE.EdgesGeometry(
+		this.natureTreePreviewBoxGeometry
+	);
 	private readonly transformControls: TransformControls;
 	private readonly transformControlsHelper: THREE.Object3D;
 
@@ -152,6 +198,7 @@ export class EditorController {
 	private selectionConnectedAppend = false;
 	private selectionWasDragged = false;
 	private activePropPlacement: ActivePropPlacement | null = null;
+	private lastNatureTreePreviewSignature: string | null = null;
 
 	private readonly targetHighlight: THREE.LineSegments;
 	private readonly boxPreviewWireframe: THREE.LineSegments;
@@ -170,18 +217,37 @@ export class EditorController {
 		this.targetHighlight = createWireCube(ADD_COLOR, 0.9);
 		this.boxPreviewWireframe = createWireCube(ADD_COLOR, 0.95);
 		this.boxPreviewGhost = createGhostCube(ADD_COLOR, 0.14);
+		const natureBrushFill = new THREE.Mesh(
+			this.natureBrushFillGeometry,
+			this.natureBrushFillMaterial
+		);
+		const natureBrushRing = new THREE.Mesh(
+			this.natureBrushRingGeometry,
+			this.natureBrushRingMaterial
+		);
 
 		this.selectionRoot.visible = false;
 		this.selectionRoot.renderOrder = 18;
 		this.propPlacementRoot.visible = false;
 		this.propPlacementRoot.rotation.order = 'XYZ';
 		this.propPlacementRoot.renderOrder = 21;
+		this.natureBrushRoot.visible = false;
+		this.natureBrushRoot.renderOrder = 20;
+		this.natureTreePreviewRoot.visible = false;
+		this.natureTreePreviewRoot.renderOrder = 20;
+		natureBrushFill.rotation.x = -Math.PI * 0.5;
+		natureBrushFill.position.y = 0.01;
+		natureBrushRing.rotation.x = -Math.PI * 0.5;
+		natureBrushRing.position.y = 0.02;
+		this.natureBrushRoot.add(natureBrushFill, natureBrushRing);
 
 		this.voxelScene.add(
 			this.targetHighlight,
 			this.boxPreviewWireframe,
 			this.boxPreviewGhost,
-			this.selectionRoot
+			this.selectionRoot,
+			this.natureBrushRoot,
+			this.natureTreePreviewRoot
 		);
 		this.worldScene.add(this.propPlacementRoot);
 
@@ -236,7 +302,7 @@ export class EditorController {
 	}
 
 	getPlacementTarget(): WorldCoord | null {
-		if (this.state.selectionEnabled || this.activePropPlacement) {
+		if (this.state.selectionEnabled || this.activePropPlacement || this.isNatureToolActive()) {
 			return null;
 		}
 
@@ -253,6 +319,20 @@ export class EditorController {
 				this.activePropPlacement.origin.x,
 				this.activePropPlacement.origin.y,
 				this.activePropPlacement.origin.z
+			);
+		}
+
+		if (this.isNatureToolActive()) {
+			const natureAnchor = resolveNatureGroundAnchor(this.world, this.state.hoverHit);
+
+			if (!natureAnchor) {
+				return null;
+			}
+
+			return this.world.getChunkCoordFromWorld(
+				natureAnchor.x,
+				natureAnchor.surfaceY,
+				natureAnchor.z
 			);
 		}
 
@@ -288,6 +368,17 @@ export class EditorController {
 
 	isPropPlacementActive(): boolean {
 		return this.activePropPlacement !== null;
+	}
+
+	getNatureToolType(): NatureActiveTool | null {
+		switch (this.state.activeTool) {
+			case 'nature-grass':
+				return 'grass-paint';
+			case 'nature-tree':
+				return 'tree-place';
+			default:
+				return null;
+		}
 	}
 
 	isTransformDragging(): boolean {
@@ -352,6 +443,10 @@ export class EditorController {
 		this.state.selectionEnabled = false;
 		this.clearInteraction();
 		this.clearSelectionDrag();
+		if (this.isNatureToolActive()) {
+			setActiveEditorTool(this.state, 'brush-add');
+			this.lastNatureTreePreviewSignature = null;
+		}
 
 		this.activePropPlacement = {
 			prop,
@@ -376,8 +471,33 @@ export class EditorController {
 		return true;
 	}
 
+	startNatureTool(tool: NatureEditorTool): void {
+		this.cancelPropPlacement();
+		this.state.enabled = true;
+		this.state.selectionEnabled = false;
+		this.clearInteraction();
+		this.clearSelection();
+		this.clearSelectionDrag();
+		setActiveEditorTool(this.state, tool);
+		this.lastNatureTreePreviewSignature = null;
+		this.updatePreviewState();
+	}
+
+	cancelNatureTool(): void {
+		if (!this.isNatureToolActive()) {
+			return;
+		}
+
+		this.clearInteraction();
+		this.clearSelectionDrag();
+		setActiveEditorTool(this.state, 'brush-add');
+		this.lastNatureTreePreviewSignature = null;
+		this.updatePreviewState();
+	}
+
 	cancelPlacement(): void {
 		this.cancelPropPlacement();
+		this.cancelNatureTool();
 	}
 
 	handleDeletedProp(propId: PropId): void {
@@ -388,11 +508,14 @@ export class EditorController {
 
 	dispose(): void {
 		this.cancelPropPlacement();
+		this.cancelNatureTool();
 		this.voxelScene.remove(
 			this.targetHighlight,
 			this.boxPreviewWireframe,
 			this.boxPreviewGhost,
-			this.selectionRoot
+			this.selectionRoot,
+			this.natureBrushRoot,
+			this.natureTreePreviewRoot
 		);
 		this.worldScene.remove(this.propPlacementRoot, this.transformControlsHelper);
 		disposePreviewObject(this.targetHighlight);
@@ -400,6 +523,7 @@ export class EditorController {
 		disposePreviewObject(this.boxPreviewGhost);
 		clearGroupChildren(this.selectionRoot);
 		clearGroupChildren(this.propPlacementRoot);
+		clearGroupChildren(this.natureTreePreviewRoot);
 		this.selectionEdgesGeometry.dispose();
 		this.selectionBoxGeometry.dispose();
 		this.selectionWireMaterial.dispose();
@@ -408,6 +532,14 @@ export class EditorController {
 		this.propPlacementBoxGeometry.dispose();
 		this.propPlacementWireMaterial.dispose();
 		this.propPlacementFillMaterial.dispose();
+		this.natureBrushFillGeometry.dispose();
+		this.natureBrushRingGeometry.dispose();
+		this.natureBrushFillMaterial.dispose();
+		this.natureBrushRingMaterial.dispose();
+		this.natureTreePreviewEdgesGeometry.dispose();
+		this.natureTreePreviewBoxGeometry.dispose();
+		this.natureTreePreviewFillMaterial.dispose();
+		this.natureTreePreviewWireMaterial.dispose();
 		this.transformControls.dispose();
 	}
 
@@ -434,11 +566,17 @@ export class EditorController {
 		this.clearSelectionDrag();
 		this.state.selectionEnabled = false;
 		this.cancelPropPlacement();
+		this.cancelNatureTool();
 	}
 
 	private handleHotkeys(): void {
 		if (this.consumeUndoHotkey()) {
 			this.undoLastEdit();
+			return;
+		}
+
+		if (this.input.consumeKeyPress('Escape') && this.isNatureToolActive()) {
+			this.cancelNatureTool();
 			return;
 		}
 
@@ -449,6 +587,10 @@ export class EditorController {
 		}
 
 		if (this.input.consumeKeyPress('KeyX')) {
+			if (this.isNatureToolActive()) {
+				setActiveEditorTool(this.state, 'brush-add');
+			}
+
 			this.state.selectionEnabled = !this.state.selectionEnabled;
 			this.clearInteraction();
 			this.clearSelectionDrag();
@@ -651,11 +793,34 @@ export class EditorController {
 	}
 
 	private updatePreviewState(): void {
+		const natureState = getNatureUiState();
+		const grassAnchor =
+			this.state.enabled &&
+			!this.state.selectionEnabled &&
+			!this.activePropPlacement &&
+			this.state.activeTool === 'nature-grass'
+				? resolveNatureGroundAnchor(this.world, this.state.hoverHit)
+				: null;
+		const treePreview =
+			this.state.enabled &&
+			!this.state.selectionEnabled &&
+			!this.activePropPlacement &&
+			this.state.activeTool === 'nature-tree'
+				? buildNatureTreePreview(
+						this.world,
+						this.player,
+						this.state.hoverHit,
+						natureState.treeSettings
+					)
+				: null;
 		const placementBox =
-			this.state.enabled && !this.state.selectionEnabled ? this.getPlacementTargetBox() : null;
+			this.state.enabled && !this.state.selectionEnabled && !this.isNatureToolActive()
+				? this.getPlacementTargetBox()
+				: null;
 		const showBoxPreview =
 			this.state.enabled &&
 			!this.activePropPlacement &&
+			!this.isNatureToolActive() &&
 			!!this.state.previewBox &&
 			(!this.state.selectionEnabled || this.selectionWasDragged);
 
@@ -668,6 +833,8 @@ export class EditorController {
 		this.boxPreviewGhost.visible = showBoxPreview;
 		this.selectionRoot.visible = this.selectedBlockIds.size > 0 && !this.activePropPlacement;
 		this.propPlacementRoot.visible = this.activePropPlacement !== null;
+		this.natureBrushRoot.visible = grassAnchor !== null;
+		this.natureTreePreviewRoot.visible = !!treePreview?.anchor;
 		this.transformControlsHelper.visible = this.activePropPlacement !== null;
 		this.transformControls.enabled = this.activePropPlacement !== null;
 
@@ -684,9 +851,30 @@ export class EditorController {
 			setPreviewColor(this.boxPreviewWireframe, previewColor);
 			setPreviewColor(this.boxPreviewGhost, previewColor);
 		}
+
+		if (grassAnchor) {
+			const brushScale = natureState.grassSettings.radius + 0.58;
+			this.natureBrushRoot.position.set(
+				grassAnchor.x + 0.5,
+				grassAnchor.surfaceY + 1.02,
+				grassAnchor.z + 0.5
+			);
+			this.natureBrushRoot.scale.setScalar(brushScale);
+		}
+
+		if (treePreview) {
+			this.syncNatureTreePreview(treePreview);
+		} else {
+			clearGroupChildren(this.natureTreePreviewRoot);
+			this.lastNatureTreePreviewSignature = null;
+		}
 	}
 
 	private resolveActiveTool(): EditorTool {
+		if (this.isNatureToolActive()) {
+			return this.natureTool;
+		}
+
 		return getInteractionBoxToolMode(this.state.activeTool, this.state.dragMode)
 			? this.boxTool
 			: this.brushTool;
@@ -1082,6 +1270,30 @@ export class EditorController {
 		this.cancelPropPlacement();
 	}
 
+	private syncNatureTreePreview(preview: NatureTreePreview): void {
+		if (preview.signature !== this.lastNatureTreePreviewSignature) {
+			clearGroupChildren(this.natureTreePreviewRoot);
+
+			for (const block of preview.blocks) {
+				this.natureTreePreviewRoot.add(
+					createNaturePreviewBlock(
+						block.origin,
+						this.natureTreePreviewBoxGeometry,
+						this.natureTreePreviewEdgesGeometry,
+						this.natureTreePreviewFillMaterial,
+						this.natureTreePreviewWireMaterial
+					)
+				);
+			}
+
+			this.lastNatureTreePreviewSignature = preview.signature;
+		}
+
+		const previewColor = preview.valid ? NATURE_PREVIEW_COLOR : NATURE_INVALID_COLOR;
+		this.natureTreePreviewFillMaterial.color.copy(previewColor);
+		this.natureTreePreviewWireMaterial.color.copy(previewColor);
+	}
+
 	private cancelPropPlacement(reopenManager = false): void {
 		this.activePropPlacement = null;
 		this.transformControls.detach();
@@ -1095,6 +1307,10 @@ export class EditorController {
 		if (reopenManager) {
 			openPropManager();
 		}
+	}
+
+	private isNatureToolActive(): boolean {
+		return this.state.activeTool === 'nature-grass' || this.state.activeTool === 'nature-tree';
 	}
 
 	private clearSelectionDrag(): void {
@@ -1134,6 +1350,10 @@ export class EditorController {
 	}
 
 	private shouldUseRegionDrag(): boolean {
+		if (this.isNatureToolActive()) {
+			return false;
+		}
+
 		if (isBoxTool(this.state.activeTool)) {
 			return true;
 		}
@@ -1157,6 +1377,10 @@ export class EditorController {
 	}
 
 	private getPlacementTargetBox(): WorldBox | null {
+		if (this.isNatureToolActive()) {
+			return null;
+		}
+
 		const target = this.getPlacementTarget();
 
 		if (!target) {
@@ -1306,6 +1530,24 @@ function createPropPlacementPreviewBlock(
 	);
 	group.scale.setScalar(scaledSize);
 	group.renderOrder = 21;
+	return group;
+}
+
+function createNaturePreviewBlock(
+	origin: WorldCoord,
+	boxGeometry: THREE.BoxGeometry,
+	edgesGeometry: THREE.EdgesGeometry,
+	fillMaterial: THREE.MeshBasicMaterial,
+	wireMaterial: THREE.LineBasicMaterial
+): THREE.Group {
+	const group = new THREE.Group();
+	const mesh = new THREE.Mesh(boxGeometry, fillMaterial);
+	const wireframe = new THREE.LineSegments(edgesGeometry, wireMaterial);
+
+	group.add(mesh, wireframe);
+	group.position.set(origin.x + 0.5, origin.y + 0.5, origin.z + 0.5);
+	group.scale.setScalar(1);
+	group.renderOrder = 20;
 	return group;
 }
 

@@ -1,3 +1,4 @@
+import type { NatureRole } from '$lib/nature/natureTypes';
 import type { VoxelId } from '$lib/voxel/voxelTypes';
 
 export interface VoxelPaletteEntry {
@@ -8,6 +9,7 @@ export interface VoxelPaletteEntry {
 	isWater: boolean;
 	emitsLight: boolean;
 	lightTint: [number, number, number];
+	natureRole?: NatureRole;
 	archived: boolean;
 }
 
@@ -19,6 +21,7 @@ export interface SerializedVoxelPaletteEntry {
 	isWater?: boolean;
 	emitsLight?: boolean;
 	lightTint?: [number, number, number];
+	natureRole?: NatureRole;
 	archived?: boolean;
 }
 
@@ -230,6 +233,7 @@ export function createSerializedVoxelPaletteState(): SerializedVoxelPaletteState
 			isWater: entry.isWater,
 			emitsLight: entry.emitsLight,
 			lightTint: [...entry.lightTint] as [number, number, number],
+			natureRole: entry.natureRole,
 			archived: entry.archived
 		})),
 		hotbar: [...paletteState.hotbar]
@@ -246,6 +250,7 @@ export function getDefaultSerializedVoxelPaletteState(): SerializedVoxelPaletteS
 			isWater: entry.isWater ?? false,
 			emitsLight: entry.emitsLight ?? false,
 			lightTint: [...(entry.lightTint ?? entry.color)] as [number, number, number],
+			natureRole: entry.natureRole,
 			archived: false
 		})),
 		hotbar: createDefaultHotbar()
@@ -332,6 +337,7 @@ export function restoreSerializedVoxelPaletteState(state: SerializedVoxelPalette
 			isWater: entry.isWater ?? false,
 			emitsLight: entry.emitsLight ?? false,
 			lightTint: [...(entry.lightTint ?? entry.color)] as [number, number, number],
+			natureRole: entry.natureRole,
 			archived: entry.archived ?? false
 		})),
 		hotbar: [...normalizedState.hotbar]
@@ -377,6 +383,24 @@ export function getVoxelSurfaceProfile(id: VoxelId): VoxelSurfaceProfile {
 		return { ...baseProfile };
 	}
 
+	if (entry.natureRole === 'grass' || entry.natureRole === 'leaf') {
+		return {
+			roughness: 0.96,
+			metalness: 0,
+			bounce: 0.52,
+			highlight: 0.06
+		};
+	}
+
+	if (entry.natureRole === 'bark') {
+		return {
+			roughness: 0.94,
+			metalness: 0.01,
+			bounce: 0.28,
+			highlight: 0.05
+		};
+	}
+
 	if (!entry.emitsLight) {
 		return { ...baseProfile };
 	}
@@ -391,6 +415,37 @@ export function getVoxelSurfaceProfile(id: VoxelId): VoxelSurfaceProfile {
 
 export function isWaterVoxelMaterial(id: VoxelId): boolean {
 	return getVoxelPaletteEntry(id)?.isWater ?? false;
+}
+
+export function getVoxelNatureRole(id: VoxelId): NatureRole | null {
+	return getVoxelPaletteEntry(id)?.natureRole ?? null;
+}
+
+export function isNatureMaterial(id: VoxelId): boolean {
+	return getVoxelNatureRole(id) !== null;
+}
+
+export function isNatureGrassMaterial(id: VoxelId): boolean {
+	return getVoxelNatureRole(id) === 'grass';
+}
+
+export function isNatureLeafMaterial(id: VoxelId): boolean {
+	return getVoxelNatureRole(id) === 'leaf';
+}
+
+export function isNatureBarkMaterial(id: VoxelId): boolean {
+	return getVoxelNatureRole(id) === 'bark';
+}
+
+export function isNatureFoliageMaterial(id: VoxelId): boolean {
+	const role = getVoxelNatureRole(id);
+	return role === 'grass' || role === 'leaf';
+}
+
+export function getNatureMaterialIds(role: NatureRole): VoxelId[] {
+	return paletteState.materials
+		.filter((entry) => !entry.archived && entry.natureRole === role)
+		.map((entry) => entry.id);
 }
 
 export function isSolidVoxelMaterial(id: VoxelId): boolean {
@@ -470,13 +525,72 @@ export function createVoxelMaterial(input: {
 	isWater?: boolean;
 	emitsLight?: boolean;
 	lightTint?: [number, number, number];
+	natureRole?: NatureRole;
 }): VoxelPaletteEntry | null {
+	return createPaletteMaterial(input, true);
+}
+
+export function ensureVoxelMaterial(input: {
+	name: string;
+	color: [number, number, number];
+	opacity: number;
+	isWater?: boolean;
+	emitsLight?: boolean;
+	lightTint?: [number, number, number];
+	natureRole?: NatureRole;
+	assignToHotbar?: boolean;
+}): VoxelPaletteEntry {
+	const existingMaterial = paletteState.materials.find((entry) => entry.name === input.name);
+
+	if (existingMaterial) {
+		if (existingMaterial.archived || existingMaterial.natureRole !== input.natureRole) {
+			const nextMaterial: VoxelPaletteEntry = {
+				...existingMaterial,
+				archived: false,
+				natureRole: input.natureRole
+			};
+
+			paletteState = {
+				...paletteState,
+				materials: paletteState.materials.map((entry) =>
+					entry.id === existingMaterial.id ? nextMaterial : entry
+				)
+			};
+			emitPaletteState();
+			return clonePaletteEntry(nextMaterial);
+		}
+
+		return clonePaletteEntry(existingMaterial);
+	}
+
+	const material = createPaletteMaterial(input, input.assignToHotbar ?? false);
+
+	if (!material) {
+		throw new Error(`Failed to ensure voxel material "${input.name}".`);
+	}
+
+	return material;
+}
+
+function createPaletteMaterial(
+	input: {
+		name: string;
+		color: [number, number, number];
+		opacity: number;
+		isWater?: boolean;
+		emitsLight?: boolean;
+		lightTint?: [number, number, number];
+		natureRole?: NatureRole;
+	},
+	assignToHotbar: boolean
+): VoxelPaletteEntry | null {
 	const name = input.name.trim();
 	const color = normalizeColorTuple(input.color);
 	const opacity = normalizeOpacity(input.opacity);
 	const isWater = input.isWater ?? false;
 	const emitsLight = input.emitsLight ?? false;
 	const lightTint = normalizeColorTuple(input.lightTint ?? input.color);
+	const natureRole = input.natureRole;
 
 	if (!name || !color || opacity === null || !lightTint) {
 		return null;
@@ -491,13 +605,17 @@ export function createVoxelMaterial(input: {
 		isWater,
 		emitsLight,
 		lightTint,
+		natureRole,
 		archived: false
 	};
 	const nextHotbar = [...paletteState.hotbar];
-	const firstEmptySlot = nextHotbar.findIndex((slot) => slot === null);
 
-	if (firstEmptySlot >= 0) {
-		nextHotbar[firstEmptySlot] = material.id;
+	if (assignToHotbar) {
+		const firstEmptySlot = nextHotbar.findIndex((slot) => slot === null);
+
+		if (firstEmptySlot >= 0) {
+			nextHotbar[firstEmptySlot] = material.id;
+		}
 	}
 
 	paletteState = {
@@ -659,6 +777,7 @@ function createDefaultPaletteState(): VoxelPaletteState {
 			isWater: entry.isWater ?? false,
 			emitsLight: entry.emitsLight ?? false,
 			lightTint: [...(entry.lightTint ?? entry.color)] as [number, number, number],
+			natureRole: entry.natureRole,
 			archived: false
 		})),
 		hotbar: [...defaults.hotbar]
@@ -693,6 +812,7 @@ function clonePaletteEntry(entry: VoxelPaletteEntry): VoxelPaletteEntry {
 		isWater: entry.isWater,
 		emitsLight: entry.emitsLight,
 		lightTint: [...entry.lightTint] as [number, number, number],
+		natureRole: entry.natureRole,
 		archived: entry.archived
 	};
 }
@@ -710,6 +830,7 @@ function normalizeSerializedPaletteEntry(value: unknown): SerializedVoxelPalette
 		isWater?: unknown;
 		emitsLight?: unknown;
 		lightTint?: unknown;
+		natureRole?: unknown;
 		archived?: unknown;
 	};
 	const color = normalizeColorTuple(candidate.color);
@@ -717,6 +838,7 @@ function normalizeSerializedPaletteEntry(value: unknown): SerializedVoxelPalette
 	const isWater = candidate.isWater ?? false;
 	const emitsLight = candidate.emitsLight ?? false;
 	const lightTint = normalizeColorTuple(candidate.lightTint ?? candidate.color);
+	const natureRole = normalizeNatureRole(candidate.natureRole);
 
 	if (
 		typeof candidate.id !== 'number' ||
@@ -729,6 +851,7 @@ function normalizeSerializedPaletteEntry(value: unknown): SerializedVoxelPalette
 		typeof isWater !== 'boolean' ||
 		typeof emitsLight !== 'boolean' ||
 		!lightTint ||
+		(candidate.natureRole !== undefined && natureRole === null) ||
 		(candidate.archived !== undefined && typeof candidate.archived !== 'boolean')
 	) {
 		return null;
@@ -742,6 +865,7 @@ function normalizeSerializedPaletteEntry(value: unknown): SerializedVoxelPalette
 		isWater,
 		emitsLight,
 		lightTint,
+		natureRole: natureRole ?? undefined,
 		archived: candidate.archived ?? false
 	};
 }
@@ -789,4 +913,12 @@ function normalizeHotbarSlot(
 
 function areColorsEqual(a: [number, number, number], b: [number, number, number]): boolean {
 	return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+}
+
+function normalizeNatureRole(value: unknown): NatureRole | null {
+	if (value === undefined) {
+		return null;
+	}
+
+	return value === 'grass' || value === 'leaf' || value === 'bark' ? value : null;
 }

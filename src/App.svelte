@@ -9,10 +9,25 @@
 		type MaterialManagerUiState
 	} from '$lib/ui/materialManagerState';
 	import {
+		closeNaturePanel,
+		setNaturePreset,
+		subscribeNatureUiState,
+		type NatureUiState
+	} from '$lib/ui/natureState';
+	import {
 		closePropManager,
 		subscribePropUiState,
 		type PropUiState
 	} from '$lib/ui/propManagerState';
+	import {
+		DEFAULT_NATURE_GRASS_SETTINGS,
+		DEFAULT_NATURE_TREE_SETTINGS
+	} from '$lib/nature/natureTypes';
+	import type {
+		NatureGrassHeightVariance,
+		NaturePreset,
+		NatureTreeSize
+	} from '$lib/nature/natureTypes';
 	import { subscribePropLibrary, type PropLibraryState } from '$lib/voxel/propLibrary';
 	import {
 		subscribeVoxelPalette,
@@ -38,6 +53,13 @@
 		placementPropName: null,
 		transformMode: 'translate'
 	});
+	let natureUiState = $state<NatureUiState>({
+		open: false,
+		activePreset: 'grass',
+		activeTool: null,
+		grassSettings: { ...DEFAULT_NATURE_GRASS_SETTINGS },
+		treeSettings: { ...DEFAULT_NATURE_TREE_SETTINGS }
+	});
 	let propLibraryState = $state<PropLibraryState>({ props: [] });
 	let selectedMaterialId = $state(0);
 	let newMaterialName = $state('');
@@ -52,6 +74,24 @@
 	let newPropInteractable = $state(false);
 	let selectedPropBlockCount = $state(0);
 	const isDevelopment = import.meta.env.DEV;
+	const grassVarianceOptions: Array<{
+		value: NatureGrassHeightVariance;
+		label: string;
+		copy: string;
+	}> = [
+		{ value: 'low', label: 'Low', copy: 'Mostly clipped tufts with a few short rises.' },
+		{ value: 'medium', label: 'Medium', copy: 'Patchy yard grass with a little layered height.' },
+		{ value: 'high', label: 'High', copy: 'More broken-up tufts and taller stray blades.' }
+	];
+	const treeSizeOptions: Array<{ value: NatureTreeSize; label: string; copy: string }> = [
+		{ value: 'small', label: 'Small', copy: 'Street-edge sapling with a compact crown.' },
+		{
+			value: 'medium',
+			label: 'Medium',
+			copy: 'Balanced neighborhood tree with readable branching.'
+		},
+		{ value: 'large', label: 'Large', copy: 'Taller canopy with deeper branch spread.' }
+	];
 
 	$effect(() => {
 		if (!newMaterialEmitsLight) {
@@ -81,6 +121,9 @@
 				selectedPropBlockCount = currentGame.getSelectedPropBlockCount();
 			}
 		});
+		const unsubscribeNatureUi = subscribeNatureUiState((state) => {
+			natureUiState = state;
+		});
 		const unsubscribePropLibrary = subscribePropLibrary((state) => {
 			propLibraryState = state;
 		});
@@ -89,6 +132,7 @@
 			unsubscribeMaterialManager();
 			unsubscribePalette();
 			unsubscribePropUi();
+			unsubscribeNatureUi();
 			unsubscribePropLibrary();
 			currentGame.dispose();
 			game = null;
@@ -143,6 +187,22 @@
 
 	function handleClosePropManager(): void {
 		closePropManager();
+	}
+
+	function handleCloseNaturePanel(): void {
+		closeNaturePanel();
+	}
+
+	function handleSelectNaturePreset(preset: NaturePreset): void {
+		setNaturePreset(preset);
+	}
+
+	function handleActivateNaturePreset(preset: NaturePreset): void {
+		game?.activateNaturePreset(preset);
+	}
+
+	function handleCancelNatureTool(): void {
+		game?.cancelNatureTool();
 	}
 
 	function handleHotbarSlotClick(slotIndex: number): void {
@@ -308,6 +368,62 @@
 		game?.deleteProp(propId);
 	}
 
+	function handleNatureGrassRadiusChange(value: string): void {
+		const radius = Number.parseInt(value, 10);
+
+		if (!Number.isFinite(radius)) {
+			return;
+		}
+
+		game?.updateNatureGrassSettings({ radius });
+	}
+
+	function handleNatureGrassDensityChange(value: string): void {
+		const density = Number.parseFloat(value);
+
+		if (!Number.isFinite(density)) {
+			return;
+		}
+
+		game?.updateNatureGrassSettings({ density });
+	}
+
+	function handleNatureGrassVarianceChange(value: string): void {
+		if (value !== 'low' && value !== 'medium' && value !== 'high') {
+			return;
+		}
+
+		game?.updateNatureGrassSettings({ heightVariance: value });
+	}
+
+	function handleNatureGrassSeedChange(value: string): void {
+		const seedOffset = Number.parseInt(value, 10);
+
+		if (!Number.isFinite(seedOffset)) {
+			return;
+		}
+
+		game?.updateNatureGrassSettings({ seedOffset });
+	}
+
+	function handleNatureTreeSizeChange(value: string): void {
+		if (value !== 'small' && value !== 'medium' && value !== 'large') {
+			return;
+		}
+
+		game?.updateNatureTreeSettings({ size: value });
+	}
+
+	function handleNatureTreeSeedChange(value: string): void {
+		const seedOffset = Number.parseInt(value, 10);
+
+		if (!Number.isFinite(seedOffset)) {
+			return;
+		}
+
+		game?.updateNatureTreeSettings({ seedOffset });
+	}
+
 	function getVisibleMaterials(): VoxelPaletteEntry[] {
 		return voxelPaletteState.materials.filter((material) => !material.archived);
 	}
@@ -364,6 +480,24 @@
 			event.dataTransfer?.getData('text/plain');
 		const parsed = payload ? Number.parseInt(payload, 10) : draggedMaterialId;
 		return Number.isInteger(parsed) ? parsed : null;
+	}
+
+	function formatNatureDensity(value: number): string {
+		return `${Math.round(value * 100)}%`;
+	}
+
+	function getNaturePresetTitle(preset: NaturePreset): string {
+		return preset === 'grass' ? 'Grass Brush' : 'Tree Generator';
+	}
+
+	function getNatureToolTitle(): string {
+		return natureUiState.activeTool === 'grass-paint' ? 'Grass Brush Live' : 'Tree Planting Live';
+	}
+
+	function getNatureToolCopy(): string {
+		return natureUiState.activeTool === 'grass-paint'
+			? 'Drag across exposed ground to repaint patchy tufts without damaging the terrain below.'
+			: 'Click exposed ground to place a full procedural tree with rough bark, branches, and a layered canopy.';
 	}
 </script>
 
@@ -434,6 +568,8 @@
 				<span class="dock-copy">Day/Night</span>
 				<span class="keycap">M</span>
 				<span class="dock-copy">Materials</span>
+				<span class="keycap">N</span>
+				<span class="dock-copy">Nature</span>
 				<span class="keycap">P</span>
 				<span class="dock-copy">Props</span>
 				<span class="keycap">X</span>
@@ -754,6 +890,299 @@
 		</div>
 	{/if}
 
+	{#if natureUiState.open}
+		<div class="nature-overlay" role="dialog" aria-modal="true" aria-label="Nature Library">
+			<button
+				class="nature-overlay-backdrop"
+				type="button"
+				aria-label="Close nature library"
+				onclick={handleCloseNaturePanel}
+			></button>
+
+			<section class="nature-panel">
+				<header class="nature-panel-head">
+					<div>
+						<div class="nature-panel-kicker">Ground Cover And Canopy Kit</div>
+						<h2 class="nature-panel-title">Nature</h2>
+						<p class="nature-panel-copy">
+							Paint sparse teardown-style grass across exposed ground or stamp a full procedural
+							tree with rough bark, upward branches, and layered leaf scatter.
+						</p>
+					</div>
+
+					<div class="nature-panel-actions">
+						<div class="nature-panel-note">
+							{#if natureUiState.activeTool}
+								{getNaturePresetTitle(natureUiState.activePreset ?? 'grass')} armed
+							{:else}
+								Select a preset, tune it, then start painting.
+							{/if}
+						</div>
+						<button class="nature-close" type="button" onclick={handleCloseNaturePanel}>
+							Close
+						</button>
+					</div>
+				</header>
+
+				<div class="nature-panel-body">
+					<section class="nature-preset-panel">
+						<div class="nature-preset-head">
+							<div>
+								<div class="nature-section-label">Starter Presets</div>
+								<div class="nature-section-title">Ready To Paint</div>
+							</div>
+							<div class="nature-section-note">Every brush stroke writes plain world voxels.</div>
+						</div>
+
+						<div class="nature-card-grid">
+							<article
+								class:nature-card-active={natureUiState.activePreset === 'grass'}
+								class="nature-card"
+							>
+								<button
+									class="nature-card-main"
+									type="button"
+									onclick={() => handleSelectNaturePreset('grass')}
+								>
+									<div class="nature-card-art nature-card-art-grass" aria-hidden="true">
+										<span class="nature-grass-blade nature-grass-blade-short"></span>
+										<span class="nature-grass-blade nature-grass-blade-mid"></span>
+										<span class="nature-grass-blade nature-grass-blade-tall"></span>
+										<span class="nature-grass-blade nature-grass-blade-accent"></span>
+									</div>
+									<div class="nature-card-copy">
+										<div class="nature-card-kicker">Brush Preset</div>
+										<div class="nature-card-title">Grass</div>
+										<p class="nature-card-text">
+											Scatters short voxel tufts in broken-up patches with muted green variation and
+											stepped blade heights.
+										</p>
+									</div>
+								</button>
+								<div class="nature-card-meta">
+									<span>Ground only</span>
+									<span>Soft circular falloff</span>
+									<span>1-4 voxel tufts</span>
+								</div>
+								<button
+									class="nature-card-activate"
+									type="button"
+									onclick={() => handleActivateNaturePreset('grass')}
+								>
+									Start Grass Brush
+								</button>
+							</article>
+
+							<article
+								class:nature-card-active={natureUiState.activePreset === 'trees'}
+								class="nature-card"
+							>
+								<button
+									class="nature-card-main"
+									type="button"
+									onclick={() => handleSelectNaturePreset('trees')}
+								>
+									<div class="nature-card-art nature-card-art-tree" aria-hidden="true">
+										<span class="nature-tree-trunk"></span>
+										<span class="nature-tree-leaf nature-tree-leaf-top"></span>
+										<span class="nature-tree-leaf nature-tree-leaf-left"></span>
+										<span class="nature-tree-leaf nature-tree-leaf-right"></span>
+										<span class="nature-tree-leaf nature-tree-leaf-core"></span>
+									</div>
+									<div class="nature-card-copy">
+										<div class="nature-card-kicker">Generator Preset</div>
+										<div class="nature-card-title">Trees</div>
+										<p class="nature-card-text">
+											Places a full tree with bark roughness, upward-biased branches, and scattered
+											leaf clusters for readable depth.
+										</p>
+									</div>
+								</button>
+								<div class="nature-card-meta">
+									<span>Single-click place</span>
+									<span>Rough bark tones</span>
+									<span>Procedural canopy</span>
+								</div>
+								<button
+									class="nature-card-activate"
+									type="button"
+									onclick={() => handleActivateNaturePreset('trees')}
+								>
+									Start Tree Tool
+								</button>
+							</article>
+						</div>
+					</section>
+
+					<section class="nature-settings-panel">
+						<div class="nature-settings-head">
+							<div>
+								<div class="nature-section-label">Tuning</div>
+								<div class="nature-section-title">
+									{getNaturePresetTitle(natureUiState.activePreset ?? 'grass')}
+								</div>
+							</div>
+							<div class="nature-settings-badge">
+								{natureUiState.activePreset === 'grass' ? 'Patch painter' : 'Procedural stamp'}
+							</div>
+						</div>
+
+						{#if natureUiState.activePreset === 'grass'}
+							{@const grassSettings = natureUiState.grassSettings}
+							{@const activeVariance =
+								grassVarianceOptions.find(
+									(option) => option.value === grassSettings.heightVariance
+								) ?? grassVarianceOptions[1]}
+
+							<div class="nature-settings-body">
+								<label class="nature-field">
+									<div class="nature-field-row">
+										<span class="nature-field-label">Brush Radius</span>
+										<span class="nature-field-value">{grassSettings.radius}</span>
+									</div>
+									<input
+										class="nature-range"
+										type="range"
+										min="1"
+										max="10"
+										step="1"
+										value={grassSettings.radius}
+										oninput={(event) =>
+											handleNatureGrassRadiusChange(
+												(event.currentTarget as HTMLInputElement).value
+											)}
+									/>
+								</label>
+
+								<label class="nature-field">
+									<div class="nature-field-row">
+										<span class="nature-field-label">Patch Density</span>
+										<span class="nature-field-value">
+											{formatNatureDensity(grassSettings.density)}
+										</span>
+									</div>
+									<input
+										class="nature-range"
+										type="range"
+										min="0.05"
+										max="1"
+										step="0.01"
+										value={grassSettings.density}
+										oninput={(event) =>
+											handleNatureGrassDensityChange(
+												(event.currentTarget as HTMLInputElement).value
+											)}
+									/>
+								</label>
+
+								<div class="nature-field">
+									<div class="nature-field-row">
+										<span class="nature-field-label">Height Spread</span>
+										<span class="nature-field-value">{activeVariance.label}</span>
+									</div>
+									<div class="nature-segmented">
+										{#each grassVarianceOptions as option (option.value)}
+											<button
+												class:nature-segment-active={option.value === grassSettings.heightVariance}
+												class="nature-segment"
+												type="button"
+												onclick={() => handleNatureGrassVarianceChange(option.value)}
+											>
+												{option.label}
+											</button>
+										{/each}
+									</div>
+									<div class="nature-helper-copy">{activeVariance.copy}</div>
+								</div>
+
+								<label class="nature-field">
+									<div class="nature-field-row">
+										<span class="nature-field-label">Seed Offset</span>
+										<span class="nature-field-value">{grassSettings.seedOffset}</span>
+									</div>
+									<input
+										class="nature-number"
+										type="number"
+										min="0"
+										max="9999"
+										step="1"
+										value={grassSettings.seedOffset}
+										oninput={(event) =>
+											handleNatureGrassSeedChange((event.currentTarget as HTMLInputElement).value)}
+									/>
+								</label>
+
+								<div class="nature-summary">
+									The brush only fills empty cells above exposed ground. Repainting refreshes
+									existing grass voxels without carving into terrain.
+								</div>
+							</div>
+						{:else}
+							{@const treeSettings = natureUiState.treeSettings}
+							{@const activeTreeSize =
+								treeSizeOptions.find((option) => option.value === treeSettings.size) ??
+								treeSizeOptions[1]}
+
+							<div class="nature-settings-body">
+								<div class="nature-field">
+									<div class="nature-field-row">
+										<span class="nature-field-label">Tree Size</span>
+										<span class="nature-field-value">{activeTreeSize.label}</span>
+									</div>
+									<div class="nature-segmented">
+										{#each treeSizeOptions as option (option.value)}
+											<button
+												class:nature-segment-active={option.value === treeSettings.size}
+												class="nature-segment"
+												type="button"
+												onclick={() => handleNatureTreeSizeChange(option.value)}
+											>
+												{option.label}
+											</button>
+										{/each}
+									</div>
+									<div class="nature-helper-copy">{activeTreeSize.copy}</div>
+								</div>
+
+								<label class="nature-field">
+									<div class="nature-field-row">
+										<span class="nature-field-label">Seed Offset</span>
+										<span class="nature-field-value">{treeSettings.seedOffset}</span>
+									</div>
+									<input
+										class="nature-number"
+										type="number"
+										min="0"
+										max="9999"
+										step="1"
+										value={treeSettings.seedOffset}
+										oninput={(event) =>
+											handleNatureTreeSeedChange((event.currentTarget as HTMLInputElement).value)}
+									/>
+								</label>
+
+								<div class="nature-summary">
+									Trees stamp a connected trunk, upward branches, and irregular leaf clusters. If
+									the volume would collide with existing structures, placement is skipped.
+								</div>
+							</div>
+						{/if}
+
+						<div class="nature-settings-actions">
+							<button
+								class="nature-apply"
+								type="button"
+								onclick={() => handleActivateNaturePreset(natureUiState.activePreset ?? 'grass')}
+							>
+								{natureUiState.activePreset === 'grass' ? 'Use Grass Brush' : 'Use Tree Tool'}
+							</button>
+						</div>
+					</section>
+				</div>
+			</section>
+		</div>
+	{/if}
+
 	{#if propUiState.managerOpen}
 		<div class="prop-overlay" role="dialog" aria-modal="true" aria-label="Prop Library">
 			<button
@@ -882,6 +1311,30 @@
 					</section>
 				</div>
 			</section>
+		</div>
+	{/if}
+
+	{#if natureUiState.activeTool && !natureUiState.open && !propUiState.placementActive}
+		<div class="nature-tool-banner">
+			<div class="nature-tool-kicker">Nature Tool Live</div>
+			<div class="nature-tool-title">{getNatureToolTitle()}</div>
+			<div class="nature-tool-copy">{getNatureToolCopy()}</div>
+			<div class="nature-tool-row">
+				{#if natureUiState.activeTool === 'grass-paint'}
+					<span class="keycap">LMB Drag</span>
+					<span class="dock-copy">Paint</span>
+				{:else}
+					<span class="keycap">LMB</span>
+					<span class="dock-copy">Plant</span>
+				{/if}
+				<span class="keycap">N</span>
+				<span class="dock-copy">Nature</span>
+				<span class="keycap">Esc</span>
+				<span class="dock-copy">Cancel</span>
+			</div>
+			<button class="nature-tool-cancel" type="button" onclick={handleCancelNatureTool}>
+				Cancel Tool
+			</button>
 		</div>
 	{/if}
 
@@ -1790,6 +2243,585 @@
 		overflow-wrap: anywhere;
 	}
 
+	.nature-overlay {
+		position: absolute;
+		inset: 0;
+		z-index: 4;
+		display: grid;
+		place-items: center;
+		padding: 22px;
+	}
+
+	.nature-overlay-backdrop {
+		position: absolute;
+		inset: 0;
+		border: 0;
+		background:
+			linear-gradient(180deg, rgba(8, 12, 9, 0.48), rgba(8, 12, 9, 0.78)),
+			radial-gradient(circle at top, rgba(174, 214, 116, 0.13), transparent 38%),
+			radial-gradient(circle at bottom right, rgba(173, 118, 62, 0.12), transparent 34%);
+		backdrop-filter: blur(18px);
+		cursor: pointer;
+	}
+
+	.nature-panel {
+		position: relative;
+		display: grid;
+		grid-template-rows: auto minmax(0, 1fr);
+		gap: 18px;
+		width: min(1160px, calc(100vw - 32px));
+		max-height: min(860px, calc(100vh - 44px));
+		padding: 20px;
+		border: 1px solid rgba(231, 245, 219, 0.16);
+		border-radius: 30px;
+		background:
+			linear-gradient(180deg, rgba(16, 25, 17, 0.94), rgba(16, 25, 17, 0.82)),
+			radial-gradient(circle at top left, rgba(133, 194, 94, 0.14), transparent 42%),
+			radial-gradient(circle at bottom right, rgba(162, 105, 62, 0.14), transparent 38%);
+		box-shadow:
+			0 36px 90px rgba(4, 8, 5, 0.6),
+			inset 0 1px 0 rgba(255, 255, 255, 0.08);
+		color: #eef6ea;
+		overflow: hidden;
+	}
+
+	.nature-panel::before {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background:
+			linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+			linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+		background-size: 30px 30px;
+		mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.86), transparent 88%);
+		pointer-events: none;
+	}
+
+	.nature-panel-head,
+	.nature-panel-body,
+	.nature-preset-panel,
+	.nature-settings-panel {
+		position: relative;
+		z-index: 1;
+	}
+
+	.nature-panel-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 16px;
+	}
+
+	.nature-panel-kicker,
+	.nature-card-kicker,
+	.nature-section-label {
+		color: rgba(202, 223, 174, 0.72);
+		font-size: 0.68rem;
+		font-weight: 700;
+		letter-spacing: 0.18em;
+		text-transform: uppercase;
+	}
+
+	.nature-panel-title {
+		margin: 6px 0 0;
+		font-size: clamp(1.9rem, 2.8vw, 2.7rem);
+		line-height: 1;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+	}
+
+	.nature-panel-copy {
+		margin: 10px 0 0;
+		max-width: 44rem;
+		color: rgba(226, 236, 220, 0.78);
+		font-size: 0.92rem;
+		line-height: 1.55;
+	}
+
+	.nature-panel-actions {
+		display: grid;
+		gap: 10px;
+		justify-items: end;
+	}
+
+	.nature-panel-note,
+	.nature-settings-badge {
+		padding: 10px 14px;
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.05);
+		color: rgba(234, 241, 225, 0.8);
+		font-size: 0.78rem;
+	}
+
+	.nature-close,
+	.nature-card-activate,
+	.nature-apply,
+	.nature-tool-cancel {
+		border: 1px solid rgba(231, 245, 219, 0.16);
+		border-radius: 12px;
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)),
+			radial-gradient(circle at top, rgba(162, 209, 109, 0.18), transparent 56%);
+		color: #f3f8ee;
+		font: inherit;
+		font-size: 0.76rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		cursor: pointer;
+		transition:
+			transform 140ms ease,
+			border-color 140ms ease,
+			opacity 140ms ease;
+	}
+
+	.nature-close,
+	.nature-apply,
+	.nature-tool-cancel {
+		padding: 12px 16px;
+	}
+
+	.nature-card-activate {
+		padding: 10px 12px;
+	}
+
+	.nature-close:hover,
+	.nature-card-activate:hover,
+	.nature-apply:hover,
+	.nature-tool-cancel:hover {
+		border-color: rgba(185, 223, 126, 0.5);
+		transform: translateY(-1px);
+	}
+
+	.nature-panel-body {
+		display: grid;
+		grid-template-columns: minmax(0, 1.55fr) minmax(310px, 0.92fr);
+		gap: 18px;
+		min-height: 0;
+		overflow: auto;
+		padding-right: 8px;
+		margin-right: -8px;
+		scrollbar-gutter: stable;
+	}
+
+	.nature-preset-panel,
+	.nature-settings-panel {
+		display: grid;
+		gap: 16px;
+		min-height: 0;
+		padding: 18px;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		border-radius: 24px;
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02)),
+			radial-gradient(circle at top right, rgba(170, 222, 112, 0.08), transparent 42%);
+	}
+
+	.nature-preset-head,
+	.nature-settings-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 12px;
+	}
+
+	.nature-section-title {
+		margin-top: 6px;
+		font-size: 1.08rem;
+		font-weight: 800;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.nature-section-note {
+		max-width: 15rem;
+		color: rgba(224, 236, 215, 0.66);
+		font-size: 0.74rem;
+		line-height: 1.45;
+		text-align: right;
+	}
+
+	.nature-card-grid {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 14px;
+		min-height: 0;
+	}
+
+	.nature-card {
+		display: grid;
+		gap: 12px;
+		padding: 12px;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		border-radius: 22px;
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+			radial-gradient(circle at bottom right, rgba(121, 186, 95, 0.12), transparent 42%);
+		transition:
+			transform 140ms ease,
+			border-color 140ms ease,
+			box-shadow 140ms ease;
+	}
+
+	.nature-card-active {
+		border-color: rgba(184, 226, 124, 0.42);
+		box-shadow: 0 18px 36px rgba(7, 12, 8, 0.28);
+	}
+
+	.nature-card-main {
+		display: grid;
+		gap: 12px;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.nature-card-art {
+		position: relative;
+		min-height: 148px;
+		border-radius: 18px;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		overflow: hidden;
+		background:
+			linear-gradient(180deg, rgba(199, 223, 199, 0.08), rgba(19, 26, 18, 0.2)),
+			radial-gradient(circle at 50% 20%, rgba(209, 230, 185, 0.24), transparent 42%),
+			linear-gradient(180deg, rgba(20, 35, 20, 0.82), rgba(10, 17, 11, 0.92));
+	}
+
+	.nature-card-art::after {
+		content: '';
+		position: absolute;
+		inset: auto 0 0;
+		height: 40%;
+		background:
+			linear-gradient(180deg, rgba(112, 86, 58, 0), rgba(112, 86, 58, 0.56)),
+			linear-gradient(0deg, rgba(63, 48, 31, 0.82), rgba(63, 48, 31, 0.28));
+	}
+
+	.nature-card-art-grass::before {
+		content: '';
+		position: absolute;
+		inset: auto 0 18px;
+		height: 22px;
+		background:
+			radial-gradient(circle at 20% 50%, rgba(127, 168, 88, 0.6), transparent 38%),
+			radial-gradient(circle at 54% 50%, rgba(89, 129, 58, 0.66), transparent 38%),
+			radial-gradient(circle at 82% 50%, rgba(149, 194, 99, 0.62), transparent 38%);
+		filter: blur(8px);
+	}
+
+	.nature-grass-blade {
+		position: absolute;
+		bottom: 34px;
+		width: 16px;
+		border-radius: 14px 14px 3px 3px;
+		background: linear-gradient(180deg, rgba(181, 214, 120, 0.92), rgba(78, 119, 50, 0.98));
+		box-shadow: 0 0 18px rgba(103, 152, 66, 0.18);
+	}
+
+	.nature-grass-blade-short {
+		left: 16%;
+		height: 42px;
+		transform: rotate(-9deg);
+	}
+
+	.nature-grass-blade-mid {
+		left: 34%;
+		height: 58px;
+		transform: rotate(4deg);
+	}
+
+	.nature-grass-blade-tall {
+		left: 54%;
+		height: 76px;
+		transform: rotate(-4deg);
+	}
+
+	.nature-grass-blade-accent {
+		left: 72%;
+		height: 50px;
+		background: linear-gradient(180deg, rgba(197, 227, 137, 0.94), rgba(104, 145, 60, 0.98));
+		transform: rotate(10deg);
+	}
+
+	.nature-tree-trunk {
+		position: absolute;
+		left: calc(50% - 11px);
+		bottom: 30px;
+		width: 22px;
+		height: 76px;
+		border-radius: 7px;
+		background:
+			linear-gradient(90deg, rgba(78, 54, 35, 0.88), rgba(124, 91, 57, 0.98)),
+			linear-gradient(180deg, rgba(62, 41, 25, 0.86), rgba(104, 73, 45, 0.96));
+		box-shadow: inset -5px 0 0 rgba(49, 31, 18, 0.28);
+	}
+
+	.nature-tree-trunk::before,
+	.nature-tree-trunk::after {
+		content: '';
+		position: absolute;
+		border-radius: 5px;
+		background: rgba(53, 36, 23, 0.84);
+	}
+
+	.nature-tree-trunk::before {
+		left: -8px;
+		top: 18px;
+		width: 8px;
+		height: 18px;
+	}
+
+	.nature-tree-trunk::after {
+		right: -6px;
+		top: 36px;
+		width: 6px;
+		height: 16px;
+	}
+
+	.nature-tree-leaf {
+		position: absolute;
+		border-radius: 18px;
+		background: linear-gradient(180deg, rgba(135, 176, 87, 0.92), rgba(63, 102, 43, 0.98));
+		box-shadow: 0 0 20px rgba(93, 145, 61, 0.18);
+	}
+
+	.nature-tree-leaf-top {
+		left: calc(50% - 28px);
+		top: 22px;
+		width: 56px;
+		height: 42px;
+	}
+
+	.nature-tree-leaf-left {
+		left: 20%;
+		top: 50px;
+		width: 50px;
+		height: 38px;
+	}
+
+	.nature-tree-leaf-right {
+		right: 18%;
+		top: 58px;
+		width: 48px;
+		height: 36px;
+	}
+
+	.nature-tree-leaf-core {
+		left: calc(50% - 36px);
+		top: 56px;
+		width: 72px;
+		height: 50px;
+		background: linear-gradient(180deg, rgba(154, 195, 96, 0.94), rgba(69, 108, 46, 0.98));
+	}
+
+	.nature-card-copy {
+		display: grid;
+		gap: 5px;
+	}
+
+	.nature-card-title {
+		font-size: 1rem;
+		font-weight: 800;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+	}
+
+	.nature-card-text,
+	.nature-helper-copy,
+	.nature-summary {
+		margin: 0;
+		color: rgba(226, 237, 220, 0.72);
+		font-size: 0.8rem;
+		line-height: 1.5;
+	}
+
+	.nature-card-meta {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+	}
+
+	.nature-card-meta span {
+		padding: 7px 10px;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.05);
+		color: rgba(236, 243, 230, 0.76);
+		font-size: 0.68rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.nature-settings-panel {
+		grid-template-rows: auto minmax(0, 1fr) auto;
+	}
+
+	.nature-settings-body {
+		display: grid;
+		gap: 16px;
+		align-content: start;
+		min-height: 0;
+		overflow: auto;
+		padding-right: 6px;
+		margin-right: -6px;
+	}
+
+	.nature-field {
+		display: grid;
+		gap: 10px;
+	}
+
+	.nature-field-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+	}
+
+	.nature-field-label {
+		color: rgba(222, 236, 213, 0.72);
+		font-size: 0.68rem;
+		font-weight: 700;
+		letter-spacing: 0.16em;
+		text-transform: uppercase;
+	}
+
+	.nature-field-value {
+		color: #f3f7ef;
+		font-size: 0.76rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.nature-range,
+	.nature-number {
+		box-sizing: border-box;
+		width: 100%;
+		min-width: 0;
+	}
+
+	.nature-range {
+		accent-color: #a7db65;
+	}
+
+	.nature-number {
+		padding: 12px 14px;
+		border: 1px solid rgba(255, 255, 255, 0.12);
+		border-radius: 14px;
+		background: rgba(8, 14, 9, 0.52);
+		color: #f1f6ee;
+		font: inherit;
+	}
+
+	.nature-segmented {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 8px;
+	}
+
+	.nature-segment {
+		padding: 10px 12px;
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		border-radius: 14px;
+		background: rgba(255, 255, 255, 0.03);
+		color: rgba(232, 241, 225, 0.84);
+		font: inherit;
+		font-size: 0.74rem;
+		font-weight: 700;
+		cursor: pointer;
+		transition:
+			border-color 140ms ease,
+			background-color 140ms ease,
+			transform 140ms ease;
+	}
+
+	.nature-segment:hover {
+		transform: translateY(-1px);
+	}
+
+	.nature-segment-active {
+		border-color: rgba(188, 228, 131, 0.42);
+		background:
+			linear-gradient(180deg, rgba(195, 230, 142, 0.14), rgba(195, 230, 142, 0.04)),
+			rgba(255, 255, 255, 0.03);
+	}
+
+	.nature-summary {
+		padding: 14px;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		border-radius: 18px;
+		background:
+			linear-gradient(180deg, rgba(163, 217, 101, 0.08), rgba(163, 217, 101, 0.03)),
+			rgba(255, 255, 255, 0.02);
+	}
+
+	.nature-settings-actions {
+		display: flex;
+		justify-content: flex-end;
+	}
+
+	.nature-tool-banner {
+		position: absolute;
+		left: 50%;
+		top: 92px;
+		z-index: 3;
+		display: grid;
+		gap: 10px;
+		width: min(560px, calc(100vw - 32px));
+		padding: 14px 16px;
+		transform: translateX(-50%);
+		border: 1px solid rgba(221, 241, 204, 0.22);
+		border-radius: 22px;
+		background:
+			linear-gradient(180deg, rgba(16, 25, 17, 0.88), rgba(16, 25, 17, 0.68)),
+			radial-gradient(circle at top, rgba(170, 219, 108, 0.16), transparent 44%);
+		box-shadow:
+			0 24px 54px rgba(6, 10, 6, 0.3),
+			inset 0 1px 0 rgba(255, 255, 255, 0.08);
+		backdrop-filter: blur(16px);
+		color: #edf6ea;
+		pointer-events: auto;
+	}
+
+	.nature-tool-kicker {
+		color: rgba(208, 230, 194, 0.7);
+		font-size: 0.66rem;
+		font-weight: 700;
+		letter-spacing: 0.16em;
+		text-transform: uppercase;
+	}
+
+	.nature-tool-title {
+		font-size: 0.96rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.nature-tool-copy {
+		color: rgba(228, 237, 220, 0.78);
+		font-size: 0.8rem;
+		line-height: 1.5;
+	}
+
+	.nature-tool-row {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 8px;
+		font-size: 0.8rem;
+	}
+
+	.nature-tool-cancel {
+		justify-self: start;
+	}
+
 	.prop-overlay {
 		position: absolute;
 		inset: 0;
@@ -2343,6 +3375,14 @@
 			grid-template-columns: minmax(0, 1fr);
 		}
 
+		.nature-panel-body {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.nature-card-grid {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
 		.prop-panel-body {
 			grid-template-columns: minmax(0, 1fr);
 		}
@@ -2368,11 +3408,20 @@
 			padding: 12px;
 		}
 
+		.nature-overlay {
+			padding: 12px;
+		}
+
 		.prop-overlay {
 			padding: 12px;
 		}
 
 		.material-panel {
+			max-height: calc(100vh - 24px);
+			padding: 16px;
+		}
+
+		.nature-panel {
 			max-height: calc(100vh - 24px);
 			padding: 16px;
 		}
@@ -2384,6 +3433,13 @@
 
 		.material-panel-head {
 			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.nature-panel-head,
+		.nature-preset-head,
+		.nature-settings-head {
+			flex-direction: column;
+			align-items: flex-start;
 		}
 
 		.prop-panel-head {
@@ -2401,6 +3457,10 @@
 		}
 
 		.prop-placement-banner {
+			top: 88px;
+		}
+
+		.nature-tool-banner {
 			top: 88px;
 		}
 
