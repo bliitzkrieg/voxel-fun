@@ -4,6 +4,7 @@ import {
 	getVoxelColor,
 	getVoxelLightTint,
 	getVoxelOpacity,
+	getVoxelSurfaceProfile,
 	isWaterVoxelMaterial
 } from '$lib/voxel/voxelPalette';
 import type { VoxelChunk } from '$lib/voxel/chunk';
@@ -13,6 +14,10 @@ export interface MeshSurfaceBuffers {
 	positions: number[];
 	normals: number[];
 	colors: number[];
+	ao: number[];
+	surface: number[];
+	emissive: number[];
+	water: number[];
 	indices: number[];
 	colorSize: 3 | 4;
 }
@@ -130,7 +135,11 @@ export function buildChunkMesh(world: VoxelWorld, chunk: VoxelChunk): MeshBuffer
 				const opacity = getVoxelOpacity(voxelId);
 				const isWater = isWaterVoxelMaterial(voxelId);
 				const emitsLight = doesVoxelEmitLight(voxelId);
+				const surfaceProfile = getVoxelSurfaceProfile(voxelId);
 				const lightTint = emitsLight ? getVoxelLightTint(voxelId) : null;
+				const emissiveSurfaceColor = lightTint
+					? ([lightTint[0] * 0.34, lightTint[1] * 0.34, lightTint[2] * 0.34] as const)
+					: ([0, 0, 0] as const);
 				const targetBuffers = isWater
 					? buffers.water
 					: opacity < 1
@@ -149,10 +158,33 @@ export function buildChunkMesh(world: VoxelWorld, chunk: VoxelChunk): MeshBuffer
 					}
 
 					const baseIndex = targetBuffers.positions.length / 3;
+					const faceAo = computeFaceAmbientOcclusion(world, wx, wy, wz, face);
+					const waterData = isWater
+						? computeWaterFaceData(world, wx, wy, wz, face, faceAo)
+						: ([0, 0] as const);
 
-					for (const vertex of face.vertices) {
+					for (let vertexIndex = 0; vertexIndex < face.vertices.length; vertexIndex += 1) {
+						const vertex = face.vertices[vertexIndex];
+
+						if (!vertex) {
+							continue;
+						}
+
 						targetBuffers.positions.push(lx + vertex[0], ly + vertex[1], lz + vertex[2]);
 						targetBuffers.normals.push(face.normal[0], face.normal[1], face.normal[2]);
+						targetBuffers.ao.push(faceAo[vertexIndex] ?? 1);
+						targetBuffers.surface.push(
+							surfaceProfile.roughness,
+							surfaceProfile.metalness,
+							surfaceProfile.bounce,
+							surfaceProfile.highlight
+						);
+						targetBuffers.emissive.push(
+							emissiveSurfaceColor[0],
+							emissiveSurfaceColor[1],
+							emissiveSurfaceColor[2]
+						);
+						targetBuffers.water.push(waterData[0], waterData[1]);
 
 						if (targetBuffers.colorSize === 4) {
 							targetBuffers.colors.push(color[0], color[1], color[2], opacity);
@@ -163,6 +195,10 @@ export function buildChunkMesh(world: VoxelWorld, chunk: VoxelChunk): MeshBuffer
 						if (emitsLight && lightTint) {
 							buffers.glow.positions.push(lx + vertex[0], ly + vertex[1], lz + vertex[2]);
 							buffers.glow.normals.push(face.normal[0], face.normal[1], face.normal[2]);
+							buffers.glow.ao.push(1);
+							buffers.glow.surface.push(0, 0, 0, 0);
+							buffers.glow.emissive.push(0, 0, 0);
+							buffers.glow.water.push(0, 0);
 							buffers.glow.colors.push(
 								lightTint[0],
 								lightTint[1],
@@ -172,25 +208,11 @@ export function buildChunkMesh(world: VoxelWorld, chunk: VoxelChunk): MeshBuffer
 						}
 					}
 
-					targetBuffers.indices.push(
-						baseIndex,
-						baseIndex + 1,
-						baseIndex + 2,
-						baseIndex,
-						baseIndex + 2,
-						baseIndex + 3
-					);
+					pushQuadIndices(targetBuffers.indices, baseIndex, faceAo);
 
 					if (emitsLight) {
 						const glowBaseIndex = buffers.glow.positions.length / 3 - 4;
-						buffers.glow.indices.push(
-							glowBaseIndex,
-							glowBaseIndex + 1,
-							glowBaseIndex + 2,
-							glowBaseIndex,
-							glowBaseIndex + 2,
-							glowBaseIndex + 3
-						);
+						pushQuadIndices(buffers.glow.indices, glowBaseIndex, faceAo);
 					}
 				}
 			}
@@ -205,6 +227,10 @@ function createMeshSurfaceBuffers(colorSize: 3 | 4): MeshSurfaceBuffers {
 		positions: [],
 		normals: [],
 		colors: [],
+		ao: [],
+		surface: [],
+		emissive: [],
+		water: [],
 		indices: [],
 		colorSize
 	};
@@ -231,4 +257,150 @@ function shouldRenderFace(
 
 function isTranslucentVoxel(voxelId: number): boolean {
 	return voxelId !== VOXEL_AIR && (isWaterVoxelMaterial(voxelId) || getVoxelOpacity(voxelId) < 1);
+}
+
+function pushQuadIndices(
+	indices: number[],
+	baseIndex: number,
+	ambientOcclusion: readonly [number, number, number, number]
+): void {
+	// Match the quad split to the AO gradient so recessed corners don't show a hard diagonal seam.
+	if (ambientOcclusion[0] + ambientOcclusion[2] > ambientOcclusion[1] + ambientOcclusion[3]) {
+		indices.push(
+			baseIndex,
+			baseIndex + 1,
+			baseIndex + 3,
+			baseIndex + 1,
+			baseIndex + 2,
+			baseIndex + 3
+		);
+		return;
+	}
+
+	indices.push(baseIndex, baseIndex + 1, baseIndex + 2, baseIndex, baseIndex + 2, baseIndex + 3);
+}
+
+function computeFaceAmbientOcclusion(
+	world: VoxelWorld,
+	x: number,
+	y: number,
+	z: number,
+	face: FaceDef
+): [number, number, number, number] {
+	const axis = Math.abs(face.normal[0]) > 0 ? 0 : Math.abs(face.normal[1]) > 0 ? 1 : 2;
+	const tangentAxisA = ((axis + 1) % 3) as 0 | 1 | 2;
+	const tangentAxisB = ((axis + 2) % 3) as 0 | 1 | 2;
+
+	return face.vertices.map((vertex) =>
+		computeVertexAmbientOcclusion(
+			world,
+			x,
+			y,
+			z,
+			axis,
+			face.normal[axis] ?? 1,
+			tangentAxisA,
+			tangentAxisB,
+			vertex
+		)
+	) as [number, number, number, number];
+}
+
+function computeVertexAmbientOcclusion(
+	world: VoxelWorld,
+	x: number,
+	y: number,
+	z: number,
+	axis: 0 | 1 | 2,
+	normalStep: number,
+	tangentAxisA: 0 | 1 | 2,
+	tangentAxisB: 0 | 1 | 2,
+	vertex: readonly [number, number, number]
+): number {
+	const offsets = [0, 0, 0];
+	offsets[axis] = normalStep;
+
+	const sideAStep = vertex[tangentAxisA] === 0 ? -1 : 1;
+	const sideBStep = vertex[tangentAxisB] === 0 ? -1 : 1;
+	const sideA = getVoxelOcclusionFactor(
+		world.getVoxel(
+			x + offsets[0] + (tangentAxisA === 0 ? sideAStep : 0),
+			y + offsets[1] + (tangentAxisA === 1 ? sideAStep : 0),
+			z + offsets[2] + (tangentAxisA === 2 ? sideAStep : 0)
+		)
+	);
+	const sideB = getVoxelOcclusionFactor(
+		world.getVoxel(
+			x + offsets[0] + (tangentAxisB === 0 ? sideBStep : 0),
+			y + offsets[1] + (tangentAxisB === 1 ? sideBStep : 0),
+			z + offsets[2] + (tangentAxisB === 2 ? sideBStep : 0)
+		)
+	);
+	const corner = getVoxelOcclusionFactor(
+		world.getVoxel(
+			x + offsets[0] + (tangentAxisA === 0 ? sideAStep : 0) + (tangentAxisB === 0 ? sideBStep : 0),
+			y + offsets[1] + (tangentAxisA === 1 ? sideAStep : 0) + (tangentAxisB === 1 ? sideBStep : 0),
+			z + offsets[2] + (tangentAxisA === 2 ? sideAStep : 0) + (tangentAxisB === 2 ? sideBStep : 0)
+		)
+	);
+
+	if (sideA >= 0.98 && sideB >= 0.98) {
+		return 0.34;
+	}
+
+	const combinedOcclusion = (sideA + sideB + corner) / 3;
+	return clamp01(1 - combinedOcclusion * 0.78, 0.34, 1);
+}
+
+function computeWaterFaceData(
+	world: VoxelWorld,
+	x: number,
+	y: number,
+	z: number,
+	face: FaceDef,
+	ambientOcclusion: readonly [number, number, number, number]
+): readonly [number, number] {
+	let thickness = 1;
+
+	for (let step = 1; step <= 6; step += 1) {
+		const neighborId = world.getVoxel(
+			x - face.normal[0] * step,
+			y - face.normal[1] * step,
+			z - face.normal[2] * step
+		);
+
+		if (!isWaterVoxelMaterial(neighborId)) {
+			break;
+		}
+
+		thickness += 1;
+	}
+
+	const openness =
+		(ambientOcclusion[0] + ambientOcclusion[1] + ambientOcclusion[2] + ambientOcclusion[3]) /
+		ambientOcclusion.length;
+
+	return [clamp01(thickness / 6, 0, 1), clamp01(openness, 0, 1)];
+}
+
+function getVoxelOcclusionFactor(voxelId: number): number {
+	if (voxelId === VOXEL_AIR) {
+		return 0;
+	}
+
+	if (isWaterVoxelMaterial(voxelId)) {
+		return 0.12;
+	}
+
+	const opacity = getVoxelOpacity(voxelId);
+
+	if (opacity < 1) {
+		return 0.2 + opacity * 0.28;
+	}
+
+	return doesVoxelEmitLight(voxelId) ? 0.82 : 1;
+}
+
+function clamp01(value: number, min: number, max: number): number {
+	return Math.min(max, Math.max(min, value));
 }

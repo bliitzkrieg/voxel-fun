@@ -149,6 +149,10 @@ function updateMeshGeometry(mesh: THREE.Mesh, buffers: MeshSurfaceBuffers): void
 		'color',
 		new THREE.Float32BufferAttribute(buffers.colors, buffers.colorSize)
 	);
+	geometry.setAttribute('voxelAo', new THREE.Float32BufferAttribute(buffers.ao, 1));
+	geometry.setAttribute('voxelSurface', new THREE.Float32BufferAttribute(buffers.surface, 4));
+	geometry.setAttribute('voxelEmissive', new THREE.Float32BufferAttribute(buffers.emissive, 3));
+	geometry.setAttribute('voxelWater', new THREE.Float32BufferAttribute(buffers.water, 2));
 	geometry.setIndex(buffers.indices);
 	mesh.visible = buffers.positions.length > 0;
 

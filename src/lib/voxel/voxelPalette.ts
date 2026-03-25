@@ -32,6 +32,13 @@ export interface VoxelPaletteState {
 	hotbar: Array<VoxelId | null>;
 }
 
+export interface VoxelSurfaceProfile {
+	roughness: number;
+	metalness: number;
+	bounce: number;
+	highlight: number;
+}
+
 type PaletteListener = (state: VoxelPaletteState) => void;
 
 export const HOTBAR_SLOT_COUNT = 9;
@@ -131,6 +138,70 @@ const DEFAULT_MATERIALS: SerializedVoxelPaletteEntry[] = [
 		lightTint: [0.33, 0.22, 0.18]
 	}
 ];
+
+const DEFAULT_SURFACE_PROFILE: VoxelSurfaceProfile = {
+	roughness: 0.9,
+	metalness: 0.03,
+	bounce: 0.45,
+	highlight: 0.08
+};
+
+const SURFACE_PROFILES: Partial<Record<VoxelId, VoxelSurfaceProfile>> = {
+	[VOXEL_CONCRETE]: {
+		roughness: 0.96,
+		metalness: 0.02,
+		bounce: 0.56,
+		highlight: 0.06
+	},
+	[VOXEL_BRICK]: {
+		roughness: 0.94,
+		metalness: 0.01,
+		bounce: 0.48,
+		highlight: 0.05
+	},
+	[VOXEL_PAINTED_WALL]: {
+		roughness: 0.82,
+		metalness: 0.01,
+		bounce: 0.66,
+		highlight: 0.14
+	},
+	[VOXEL_DARK_TRIM]: {
+		roughness: 0.42,
+		metalness: 0.08,
+		bounce: 0.26,
+		highlight: 0.34
+	},
+	[VOXEL_METAL]: {
+		roughness: 0.22,
+		metalness: 0.84,
+		bounce: 0.18,
+		highlight: 0.62
+	},
+	[VOXEL_ASPHALT]: {
+		roughness: 0.98,
+		metalness: 0,
+		bounce: 0.22,
+		highlight: 0.03
+	},
+	[VOXEL_TILE]: {
+		roughness: 0.62,
+		metalness: 0.04,
+		bounce: 0.52,
+		highlight: 0.24
+	},
+	[VOXEL_GLASS]: {
+		roughness: 0.12,
+		metalness: 0,
+		bounce: 0.72,
+		highlight: 0.58
+	},
+	[VOXEL_ROOF]: {
+		roughness: 0.88,
+		metalness: 0.02,
+		bounce: 0.34,
+		highlight: 0.08
+	}
+};
 
 const listeners = new Set<PaletteListener>();
 
@@ -296,6 +367,26 @@ export function getVoxelColor(id: VoxelId): [number, number, number] {
 
 export function getVoxelOpacity(id: VoxelId): number {
 	return getVoxelPaletteEntry(id)?.opacity ?? 1;
+}
+
+export function getVoxelSurfaceProfile(id: VoxelId): VoxelSurfaceProfile {
+	const entry = getVoxelPaletteEntry(id);
+	const baseProfile = SURFACE_PROFILES[id] ?? DEFAULT_SURFACE_PROFILE;
+
+	if (!entry) {
+		return { ...baseProfile };
+	}
+
+	if (!entry.emitsLight) {
+		return { ...baseProfile };
+	}
+
+	return {
+		roughness: Math.max(0.16, baseProfile.roughness * 0.72),
+		metalness: baseProfile.metalness,
+		bounce: baseProfile.bounce,
+		highlight: Math.max(baseProfile.highlight, 0.42)
+	};
 }
 
 export function isWaterVoxelMaterial(id: VoxelId): boolean {

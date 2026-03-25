@@ -5,8 +5,8 @@ import { doesVoxelEmitLight, getVoxelLightTint } from '$lib/voxel/voxelPalette';
 import type { VoxelWorld } from '$lib/voxel/world';
 
 const MAX_ACTIVE_EMISSIVE_LIGHTS = 16;
-const EMISSIVE_LIGHT_INTENSITY = 1.35;
-const EMISSIVE_LIGHT_DISTANCE_BASE = 8 * VOXEL_WORLD_SIZE;
+const EMISSIVE_LIGHT_INTENSITY = 0.95;
+const EMISSIVE_LIGHT_DISTANCE_BASE = 10 * VOXEL_WORLD_SIZE;
 const CAMERA_RESYNC_DISTANCE_SQ = (VOXEL_WORLD_SIZE * 3) ** 2;
 
 interface EmissiveLightCandidate {
@@ -28,7 +28,7 @@ export class EmissiveLightManager {
 
 	constructor(private readonly scene: THREE.Scene) {
 		for (let index = 0; index < MAX_ACTIVE_EMISSIVE_LIGHTS; index += 1) {
-			const light = new THREE.PointLight('#ffe49e', EMISSIVE_LIGHT_INTENSITY, 0, 2);
+			const light = new THREE.PointLight('#ffd8a0', EMISSIVE_LIGHT_INTENSITY, 0, 1.7);
 			light.castShadow = false;
 			light.visible = false;
 			this.lightPool.push(light);

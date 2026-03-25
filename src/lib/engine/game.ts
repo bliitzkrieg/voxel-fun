@@ -7,6 +7,11 @@ import { EmissiveLightManager } from '$lib/engine/emissiveLightManager';
 import { InputState } from '$lib/engine/input';
 import { FixedLoop } from '$lib/engine/loop';
 import { applySceneTimeOfDay, createGameScene, type SceneBundle } from '$lib/engine/scene';
+import {
+	createVoxelSurfaceMaterial,
+	syncVoxelSurfaceMaterial,
+	type VoxelSurfaceMaterial
+} from '$lib/engine/voxelSurfaceMaterial';
 import { createVoxelWaterMaterial, type WaterShaderMaterial } from '$lib/engine/waterMaterial';
 import {
 	closeMaterialManager,
@@ -67,8 +72,8 @@ export class Game {
 	voxelRoot!: THREE.Group;
 
 	chunkMeshes: Map<ChunkKey, ChunkMesh> = new Map();
-	voxelOpaqueMaterial!: THREE.MeshStandardMaterial;
-	voxelTransparentMaterial!: THREE.MeshStandardMaterial;
+	voxelOpaqueMaterial!: VoxelSurfaceMaterial;
+	voxelTransparentMaterial!: VoxelSurfaceMaterial;
 	voxelWaterMaterial!: WaterShaderMaterial;
 	voxelGlowMaterial!: THREE.MeshBasicMaterial;
 
@@ -107,12 +112,12 @@ export class Game {
 		});
 		this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 		this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-		this.renderer.toneMappingExposure = 1.1;
+		this.renderer.toneMappingExposure = 0.98;
 		this.renderer.shadowMap.enabled = true;
 		this.renderer.shadowMap.type = THREE.VSMShadowMap;
 		this.renderer.shadowMap.autoUpdate = false;
 		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
-		this.renderer.setClearColor('#bfd2d9');
+		this.renderer.setClearColor('#c4d1d3');
 		this.renderer.domElement.style.display = 'block';
 		this.renderer.domElement.style.width = '100%';
 		this.renderer.domElement.style.height = '100%';
@@ -124,19 +129,8 @@ export class Game {
 
 		this.input = new InputState(this.renderer.domElement);
 		this.world = new VoxelWorld();
-		this.voxelOpaqueMaterial = new THREE.MeshStandardMaterial({
-			vertexColors: true,
-			roughness: 0.92,
-			metalness: 0.06
-		});
-		this.voxelTransparentMaterial = new THREE.MeshStandardMaterial({
-			vertexColors: true,
-			roughness: 0.92,
-			metalness: 0.02,
-			transparent: true,
-			depthWrite: false,
-			opacity: 1
-		});
+		this.voxelOpaqueMaterial = createVoxelSurfaceMaterial();
+		this.voxelTransparentMaterial = createVoxelSurfaceMaterial({ transparent: true });
 		this.voxelWaterMaterial = createVoxelWaterMaterial();
 		this.voxelGlowMaterial = new THREE.MeshBasicMaterial({
 			vertexColors: true,
@@ -281,7 +275,7 @@ export class Game {
 
 	render(): void {
 		this.stats.recordFrame();
-		this.syncWaterMaterialUniforms();
+		this.syncRenderMaterialUniforms();
 		this.renderer.render(this.scene, this.camera);
 	}
 
@@ -788,13 +782,43 @@ export class Game {
 		this.invalidateShadows();
 	}
 
-	private syncWaterMaterialUniforms(): void {
+	private syncRenderMaterialUniforms(): void {
 		const sunLight = this.sceneBundle.sunLight;
+		const fog = this.scene.fog;
+		const fogColor = fog instanceof THREE.Fog ? fog.color : new THREE.Color('#c2cfd1');
+		const fogNear = fog instanceof THREE.Fog ? fog.near : 24;
+		const fogFar = fog instanceof THREE.Fog ? fog.far : 84;
+		const heightFogStrength = this.sceneBundle.timeOfDay === 'night' ? 0.14 : 0.2;
+		const heightFogFalloff = this.sceneBundle.timeOfDay === 'night' ? 0.24 : 0.18;
 
 		this.waterSunPosition.copy(sunLight.position);
 		this.waterSunTargetPosition.copy(sunLight.target.position);
 		this.waterSunDirection.copy(this.waterSunPosition).sub(this.waterSunTargetPosition).normalize();
 
+		syncVoxelSurfaceMaterial(this.voxelOpaqueMaterial, {
+			sunDirection: this.waterSunDirection,
+			sunColor: sunLight.color,
+			sunIntensity: sunLight.intensity,
+			skyColor: this.sceneBundle.hemisphereLight.color,
+			groundColor: this.sceneBundle.hemisphereLight.groundColor,
+			fogColor,
+			fogNear,
+			fogFar,
+			heightFogStrength,
+			heightFogFalloff
+		});
+		syncVoxelSurfaceMaterial(this.voxelTransparentMaterial, {
+			sunDirection: this.waterSunDirection,
+			sunColor: sunLight.color,
+			sunIntensity: sunLight.intensity,
+			skyColor: this.sceneBundle.hemisphereLight.color,
+			groundColor: this.sceneBundle.hemisphereLight.groundColor,
+			fogColor,
+			fogNear,
+			fogFar,
+			heightFogStrength,
+			heightFogFalloff
+		});
 		this.voxelWaterMaterial.uniforms.uTime.value = performance.now() * 0.001;
 		this.voxelWaterMaterial.uniforms.uVoxelScale.value = VOXEL_WORLD_SIZE;
 		this.voxelWaterMaterial.uniforms.uSunDirection.value.copy(this.waterSunDirection);
@@ -804,6 +828,11 @@ export class Game {
 		this.voxelWaterMaterial.uniforms.uGroundColor.value.copy(
 			this.sceneBundle.hemisphereLight.groundColor
 		);
+		this.voxelWaterMaterial.uniforms.fogColor.value.copy(fogColor);
+		this.voxelWaterMaterial.uniforms.fogNear.value = fogNear;
+		this.voxelWaterMaterial.uniforms.fogFar.value = fogFar;
+		this.voxelWaterMaterial.uniforms.uFogHeightStrength.value = heightFogStrength;
+		this.voxelWaterMaterial.uniforms.uFogHeightFalloff.value = heightFogFalloff;
 	}
 
 	private capturePaletteState(): SerializedVoxelPaletteState {
