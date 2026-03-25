@@ -2,6 +2,7 @@ import * as THREE from 'three';
 
 import { getNatureMaterialSet } from '$lib/nature/natureMaterials';
 import type {
+	NatureFlowerColorMode,
 	NatureFlowerSettings,
 	NatureGrassHeightVariance,
 	NatureGrassSettings,
@@ -223,9 +224,13 @@ export function paintNatureFlowers(
 ): VoxelCommandResult {
 	const anchor = resolveNatureGroundAnchor(world, hit);
 	const { flowerStemIds, flowerBloomIds } = getNatureMaterialSet();
+	const selectedBloomMaterialIds = resolveFlowerBloomMaterialIds(
+		settings.blossomColor,
+		flowerBloomIds
+	);
 	const result = createVoxelCommandResult();
 
-	if (!anchor || flowerStemIds.length === 0 || flowerBloomIds.length === 0) {
+	if (!anchor || flowerStemIds.length === 0 || selectedBloomMaterialIds.length === 0) {
 		return result;
 	}
 
@@ -269,7 +274,7 @@ export function paintNatureFlowers(
 			const flowerBlocks = buildFlowerPlant({
 				anchor: columnAnchor,
 				stemMaterialIds: flowerStemIds,
-				bloomMaterialIds: flowerBloomIds,
+				bloomMaterialIds: selectedBloomMaterialIds,
 				seed: hashInt(x, columnAnchor.surfaceY, z, brushSeed + 211)
 			});
 
@@ -830,9 +835,7 @@ function buildFlowerPlant(input: {
 	seed: number;
 }): GeneratedNatureVoxel[] {
 	const { anchor, stemMaterialIds, bloomMaterialIds, seed } = input;
-	const stemHeight = pickFlowerStemHeight(
-		hash01(anchor.x, anchor.surfaceY, anchor.z, seed + 17)
-	);
+	const stemHeight = pickFlowerStemHeight(hash01(anchor.x, anchor.surfaceY, anchor.z, seed + 17));
 	const blossomY = anchor.surfaceY + stemHeight + 1;
 	const stemMaterialId = pickMaterialId(
 		stemMaterialIds,
@@ -886,6 +889,25 @@ function buildFlowerPlant(input: {
 	}
 
 	return [...blocks.values()];
+}
+
+function resolveFlowerBloomMaterialIds(
+	blossomColor: NatureFlowerColorMode,
+	flowerBloomIds: ReadonlyArray<number>
+): number[] {
+	if (blossomColor === 'random') {
+		return [...flowerBloomIds];
+	}
+
+	const bloomIndexByColor: Record<Exclude<NatureFlowerColorMode, 'random'>, number> = {
+		scarlet: 0,
+		cobalt: 1,
+		amber: 2,
+		violet: 3
+	};
+	const bloomMaterialId = flowerBloomIds[bloomIndexByColor[blossomColor]];
+
+	return bloomMaterialId !== undefined ? [bloomMaterialId] : [...flowerBloomIds];
 }
 
 function canQueueFlowerPlant(

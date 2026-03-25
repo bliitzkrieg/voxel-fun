@@ -18,6 +18,12 @@ export interface PaintCommandOptions {
 	allowAirWrite?: boolean;
 }
 
+export interface FaceExtrudeCommandInput {
+	blocks: ReadonlyArray<Pick<VoxelBlock, 'id' | 'materialId' | 'origin' | 'size'>>;
+	normal: WorldCoord;
+	stepCount: number;
+}
+
 export function createVoxelCommandResult(): VoxelCommandResult {
 	return {
 		affectedChunkKeys: new Set<ChunkKey>(),
@@ -143,6 +149,47 @@ export function paintBoxCommand(
 
 	for (const blockId of collectBlockIdsInBox(world, bounds)) {
 		applyBlockPaintById(world, blockId, voxelId, result, options);
+	}
+
+	return result;
+}
+
+export function extrudeFaceCommand(
+	world: VoxelWorld,
+	input: FaceExtrudeCommandInput
+): VoxelCommandResult {
+	const result = createVoxelCommandResult();
+	const stepCount = Math.trunc(input.stepCount);
+
+	if (stepCount === 0 || input.blocks.length === 0 || !isAxisAlignedFaceNormal(input.normal)) {
+		return result;
+	}
+
+	if (stepCount < 0) {
+		for (const block of input.blocks) {
+			mergeVoxelCommandResult(
+				result,
+				setVoxelCommand(world, block.origin.x, block.origin.y, block.origin.z, VOXEL_AIR)
+			);
+		}
+
+		return result;
+	}
+
+	for (let stepIndex = 1; stepIndex <= stepCount; stepIndex += 1) {
+		for (const block of input.blocks) {
+			const cubeOrigin = offsetWorldCoord(block.origin, input.normal, block.size * stepIndex);
+			const stepResult = setVoxelCommand(
+				world,
+				cubeOrigin.x,
+				cubeOrigin.y,
+				cubeOrigin.z,
+				block.materialId,
+				block.size
+			);
+
+			mergeVoxelCommandResult(result, stepResult);
+		}
 	}
 
 	return result;
@@ -375,4 +422,21 @@ function collectBlockIdsInBox(world: VoxelWorld, bounds: WorldBox): Set<VoxelBlo
 	}
 
 	return blockIds;
+}
+
+function isAxisAlignedFaceNormal(normal: WorldCoord): boolean {
+	return (
+		Math.abs(normal.x) + Math.abs(normal.y) + Math.abs(normal.z) === 1 &&
+		Number.isInteger(normal.x) &&
+		Number.isInteger(normal.y) &&
+		Number.isInteger(normal.z)
+	);
+}
+
+function offsetWorldCoord(origin: WorldCoord, normal: WorldCoord, distance: number): WorldCoord {
+	return {
+		x: origin.x + normal.x * distance,
+		y: origin.y + normal.y * distance,
+		z: origin.z + normal.z * distance
+	};
 }

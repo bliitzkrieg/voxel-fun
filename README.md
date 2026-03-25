@@ -38,6 +38,7 @@ Click the viewport to capture the mouse. Press `Tab` or `F1` to toggle edit mode
 - `Q`: brush add
 - `E`: brush remove
 - `R`: brush paint
+- `Y`: face extrude
 - `B`: box fill
 - `H`: box hollow
 - `C`: box carve

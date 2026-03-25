@@ -7,6 +7,7 @@ export type EditorToolType =
 	| 'brush-add'
 	| 'brush-remove'
 	| 'brush-paint'
+	| 'face-extrude'
 	| 'box-fill'
 	| 'box-hollow'
 	| 'box-carve'
@@ -118,6 +119,8 @@ export function getEditorToolLabel(tool: EditorToolType): string {
 			return 'Brush Remove';
 		case 'brush-paint':
 			return 'Brush Paint';
+		case 'face-extrude':
+			return 'Face Extrude';
 		case 'box-fill':
 			return 'Box Fill';
 		case 'box-hollow':

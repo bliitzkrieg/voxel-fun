@@ -25,6 +25,7 @@
 		DEFAULT_NATURE_TREE_SETTINGS
 	} from '$lib/nature/natureTypes';
 	import type {
+		NatureFlowerColorMode,
 		NatureGrassHeightVariance,
 		NaturePreset,
 		NatureTreeSize
@@ -93,6 +94,17 @@
 			copy: 'Balanced neighborhood tree with readable branching.'
 		},
 		{ value: 'large', label: 'Large', copy: 'Taller canopy with deeper branch spread.' }
+	];
+	const flowerColorOptions: Array<{
+		value: NatureFlowerColorMode;
+		label: string;
+		copy: string;
+	}> = [
+		{ value: 'random', label: 'Random', copy: 'Mixes scarlet, cobalt, amber, and violet blooms.' },
+		{ value: 'scarlet', label: 'Scarlet', copy: 'Paints only the red blossom variant.' },
+		{ value: 'cobalt', label: 'Cobalt', copy: 'Paints only the blue blossom variant.' },
+		{ value: 'amber', label: 'Amber', copy: 'Paints only the warm orange blossom variant.' },
+		{ value: 'violet', label: 'Violet', copy: 'Paints only the purple blossom variant.' }
 	];
 
 	$effect(() => {
@@ -434,6 +446,20 @@
 		game?.updateNatureFlowerSettings({ seedOffset });
 	}
 
+	function handleNatureFlowerColorChange(value: string): void {
+		if (
+			value !== 'random' &&
+			value !== 'scarlet' &&
+			value !== 'cobalt' &&
+			value !== 'amber' &&
+			value !== 'violet'
+		) {
+			return;
+		}
+
+		game?.updateNatureFlowerSettings({ blossomColor: value });
+	}
+
 	function handleNatureTreeSizeChange(value: string): void {
 		if (value !== 'small' && value !== 'medium' && value !== 'large') {
 			return;
@@ -591,6 +617,8 @@
 				<span class="dock-copy">Erase</span>
 				<span class="keycap">R</span>
 				<span class="dock-copy">Paint</span>
+				<span class="keycap">Y</span>
+				<span class="dock-copy">Extrude</span>
 				<span class="keycap">B/H/C</span>
 				<span class="dock-copy">Fill, Hollow, Carve</span>
 			</div>
@@ -1206,6 +1234,9 @@
 							</div>
 						{:else if natureUiState.activePreset === 'flowers'}
 							{@const flowerSettings = natureUiState.flowerSettings}
+							{@const activeFlowerColor =
+								flowerColorOptions.find((option) => option.value === flowerSettings.blossomColor) ??
+								flowerColorOptions[0]}
 
 							<div class="nature-settings-body">
 								<label class="nature-field">
@@ -1250,6 +1281,25 @@
 
 								<label class="nature-field">
 									<div class="nature-field-row">
+										<span class="nature-field-label">Bloom Color</span>
+										<span class="nature-field-value">{activeFlowerColor.label}</span>
+									</div>
+									<select
+										class="nature-number"
+										value={flowerSettings.blossomColor}
+										onchange={(event) =>
+											handleNatureFlowerColorChange(
+												(event.currentTarget as HTMLSelectElement).value
+											)}
+									>
+										{#each flowerColorOptions as option (option.value)}
+											<option value={option.value}>{option.label}</option>
+										{/each}
+									</select>
+								</label>
+
+								<label class="nature-field">
+									<div class="nature-field-row">
 										<span class="nature-field-label">Seed Offset</span>
 										<span class="nature-field-value">{flowerSettings.seedOffset}</span>
 									</div>
@@ -1266,8 +1316,8 @@
 								</label>
 
 								<div class="nature-summary">
-									Flowers repaint their own stems and blossoms cleanly, and they can grow through
-									grass while leaving the surrounding ground untouched.
+									{activeFlowerColor.copy} Flowers repaint their own stems and blossoms cleanly, and they
+									can grow through grass while leaving the surrounding ground untouched.
 								</div>
 							</div>
 						{:else}

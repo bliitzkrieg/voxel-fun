@@ -12,6 +12,7 @@ import {
 } from '$lib/editor/editorState';
 import { BoxTool } from '$lib/editor/boxTool';
 import { BrushTool } from '$lib/editor/brushTool';
+import { ExtrudeTool } from '$lib/editor/extrudeTool';
 import { NatureTool } from '$lib/editor/natureTool';
 import type { EditorTool, EditorToolContext } from '$lib/editor/editorTool';
 import { createPreviewBox, getToolTargetCoord } from '$lib/editor/editorTargets';
@@ -110,6 +111,7 @@ export class EditorController {
 
 	private readonly boxTool = new BoxTool();
 	private readonly brushTool = new BrushTool();
+	private readonly extrudeTool = new ExtrudeTool();
 	private readonly natureTool = new NatureTool();
 	private readonly rayDirection = new THREE.Vector3();
 	private readonly interactionCameraPosition = new THREE.Vector3();
@@ -128,6 +130,20 @@ export class EditorController {
 		color: SELECT_COLOR,
 		transparent: true,
 		opacity: 0.92,
+		depthTest: false
+	});
+	private readonly extrudePreviewRoot = new THREE.Group();
+	private readonly extrudePreviewFillMaterial = new THREE.MeshBasicMaterial({
+		color: ADD_COLOR,
+		transparent: true,
+		opacity: 0.14,
+		depthWrite: false,
+		depthTest: false
+	});
+	private readonly extrudePreviewWireMaterial = new THREE.LineBasicMaterial({
+		color: ADD_COLOR,
+		transparent: true,
+		opacity: 0.95,
 		depthTest: false
 	});
 	private readonly selectionBoxGeometry = new THREE.BoxGeometry(1, 1, 1);
@@ -198,6 +214,7 @@ export class EditorController {
 	private selectionConnectedAppend = false;
 	private selectionWasDragged = false;
 	private activePropPlacement: ActivePropPlacement | null = null;
+	private lastExtrudePreviewSignature: string | null = null;
 	private lastNatureTreePreviewSignature: string | null = null;
 
 	private readonly targetHighlight: THREE.LineSegments;
@@ -228,6 +245,8 @@ export class EditorController {
 
 		this.selectionRoot.visible = false;
 		this.selectionRoot.renderOrder = 18;
+		this.extrudePreviewRoot.visible = false;
+		this.extrudePreviewRoot.renderOrder = 19;
 		this.propPlacementRoot.visible = false;
 		this.propPlacementRoot.rotation.order = 'XYZ';
 		this.propPlacementRoot.renderOrder = 21;
@@ -245,6 +264,7 @@ export class EditorController {
 			this.targetHighlight,
 			this.boxPreviewWireframe,
 			this.boxPreviewGhost,
+			this.extrudePreviewRoot,
 			this.selectionRoot,
 			this.natureBrushRoot,
 			this.natureTreePreviewRoot
@@ -515,6 +535,7 @@ export class EditorController {
 			this.targetHighlight,
 			this.boxPreviewWireframe,
 			this.boxPreviewGhost,
+			this.extrudePreviewRoot,
 			this.selectionRoot,
 			this.natureBrushRoot,
 			this.natureTreePreviewRoot
@@ -523,6 +544,7 @@ export class EditorController {
 		disposePreviewObject(this.targetHighlight);
 		disposePreviewObject(this.boxPreviewWireframe);
 		disposePreviewObject(this.boxPreviewGhost);
+		clearGroupChildren(this.extrudePreviewRoot);
 		clearGroupChildren(this.selectionRoot);
 		clearGroupChildren(this.propPlacementRoot);
 		clearGroupChildren(this.natureTreePreviewRoot);
@@ -530,6 +552,8 @@ export class EditorController {
 		this.selectionBoxGeometry.dispose();
 		this.selectionWireMaterial.dispose();
 		this.selectionFillMaterial.dispose();
+		this.extrudePreviewWireMaterial.dispose();
+		this.extrudePreviewFillMaterial.dispose();
 		this.propPlacementEdgesGeometry.dispose();
 		this.propPlacementBoxGeometry.dispose();
 		this.propPlacementWireMaterial.dispose();
@@ -615,6 +639,10 @@ export class EditorController {
 			if (this.input.consumeKeyPress('KeyR')) {
 				const paintTool = this.input.isShiftDown() ? 'box-paint' : 'brush-paint';
 				setActiveEditorTool(this.state, paintTool);
+			}
+
+			if (this.input.consumeKeyPress('KeyY')) {
+				setActiveEditorTool(this.state, 'face-extrude');
 			}
 
 			if (this.input.consumeKeyPress('KeyB')) {
@@ -795,6 +823,11 @@ export class EditorController {
 	}
 
 	private updatePreviewState(): void {
+		const extrudeDragging =
+			this.activeInteractionTool === this.extrudeTool && this.extrudeTool.isActive();
+		const extrudePreviewMode = extrudeDragging ? this.extrudeTool.getPreviewMode() : null;
+		const extrudePreviewBlocks = extrudeDragging ? this.extrudeTool.getPreviewBlocks() : [];
+		const extrudePreviewSignature = extrudeDragging ? this.extrudeTool.getPreviewSignature() : null;
 		const natureState = getNatureUiState();
 		const grassAnchor =
 			this.state.enabled &&
@@ -830,9 +863,11 @@ export class EditorController {
 			this.state.enabled &&
 			!this.state.selectionEnabled &&
 			!this.activePropPlacement &&
+			!extrudeDragging &&
 			placementBox !== null;
 		this.boxPreviewWireframe.visible = showBoxPreview;
 		this.boxPreviewGhost.visible = showBoxPreview;
+		this.extrudePreviewRoot.visible = extrudePreviewBlocks.length > 0;
 		this.selectionRoot.visible = this.selectedBlockIds.size > 0 && !this.activePropPlacement;
 		this.propPlacementRoot.visible = this.activePropPlacement !== null;
 		this.natureBrushRoot.visible = grassAnchor !== null;
@@ -849,9 +884,41 @@ export class EditorController {
 			positionBoxPreview(this.boxPreviewWireframe, this.state.previewBox, 1.01);
 			positionBoxPreview(this.boxPreviewGhost, this.state.previewBox, 1);
 
-			const previewColor = this.state.selectionEnabled ? SELECT_COLOR : this.getModeColor();
+			const previewColor = this.state.selectionEnabled
+				? SELECT_COLOR
+				: extrudePreviewMode === 'remove'
+					? REMOVE_COLOR
+					: this.getModeColor();
 			setPreviewColor(this.boxPreviewWireframe, previewColor);
 			setPreviewColor(this.boxPreviewGhost, previewColor);
+		}
+
+		if (extrudePreviewSignature && extrudePreviewSignature !== this.lastExtrudePreviewSignature) {
+			clearGroupChildren(this.extrudePreviewRoot);
+
+			for (const block of extrudePreviewBlocks) {
+				this.extrudePreviewRoot.add(
+					createSelectionPreviewBlock(
+						block.origin,
+						block.size,
+						this.selectionBoxGeometry,
+						this.selectionEdgesGeometry,
+						this.extrudePreviewFillMaterial,
+						this.extrudePreviewWireMaterial
+					)
+				);
+			}
+
+			this.lastExtrudePreviewSignature = extrudePreviewSignature;
+		} else if (!extrudePreviewSignature && this.lastExtrudePreviewSignature !== null) {
+			clearGroupChildren(this.extrudePreviewRoot);
+			this.lastExtrudePreviewSignature = null;
+		}
+
+		if (extrudePreviewBlocks.length > 0) {
+			const extrudePreviewColor = extrudePreviewMode === 'remove' ? REMOVE_COLOR : ADD_COLOR;
+			this.extrudePreviewFillMaterial.color.copy(extrudePreviewColor);
+			this.extrudePreviewWireMaterial.color.copy(extrudePreviewColor);
 		}
 
 		if (grassAnchor) {
@@ -876,6 +943,10 @@ export class EditorController {
 	}
 
 	private resolveActiveTool(): EditorTool {
+		if (this.state.activeTool === 'face-extrude') {
+			return this.extrudeTool;
+		}
+
 		if (this.isNatureToolActive()) {
 			return this.natureTool;
 		}
@@ -889,6 +960,8 @@ export class EditorController {
 		return {
 			world: this.world,
 			player: this.player,
+			camera: this.camera,
+			input: this.input,
 			editorState: this.state,
 			commit: (result: VoxelCommandResult) => {
 				this.commitPendingUndoSnapshot();
@@ -1338,6 +1411,7 @@ export class EditorController {
 	}
 
 	private clearInteraction(): void {
+		this.extrudeTool.cancel({ editorState: this.state });
 		this.activeInteractionTool = null;
 		this.state.dragStart = null;
 		this.state.previewBox = null;
@@ -1360,6 +1434,10 @@ export class EditorController {
 
 	private shouldUseRegionDrag(): boolean {
 		if (this.isNatureToolActive()) {
+			return false;
+		}
+
+		if (this.state.activeTool === 'face-extrude') {
 			return false;
 		}
 

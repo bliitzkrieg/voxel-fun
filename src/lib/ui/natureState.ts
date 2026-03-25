@@ -179,7 +179,10 @@ export function updateNatureFlowerSettings(input: Partial<NatureFlowerSettings>)
 		...input,
 		radius: clampInteger(input.radius ?? state.flowerSettings.radius, 1, 10),
 		density: clampFloat(input.density ?? state.flowerSettings.density, 0.05, 1),
-		seedOffset: clampInteger(input.seedOffset ?? state.flowerSettings.seedOffset, 0, 9999)
+		seedOffset: clampInteger(input.seedOffset ?? state.flowerSettings.seedOffset, 0, 9999),
+		blossomColor: isFlowerColorMode(input.blossomColor)
+			? (input.blossomColor ?? state.flowerSettings.blossomColor)
+			: state.flowerSettings.blossomColor
 	};
 
 	if (areFlowerSettingsEqual(state.flowerSettings, nextSettings)) {
@@ -223,5 +226,20 @@ function areTreeSettingsEqual(a: NatureTreeSettings, b: NatureTreeSettings): boo
 }
 
 function areFlowerSettingsEqual(a: NatureFlowerSettings, b: NatureFlowerSettings): boolean {
-	return a.radius === b.radius && a.density === b.density && a.seedOffset === b.seedOffset;
+	return (
+		a.radius === b.radius &&
+		a.density === b.density &&
+		a.seedOffset === b.seedOffset &&
+		a.blossomColor === b.blossomColor
+	);
+}
+
+function isFlowerColorMode(value: NatureFlowerSettings['blossomColor'] | undefined): boolean {
+	return (
+		value === 'random' ||
+		value === 'scarlet' ||
+		value === 'cobalt' ||
+		value === 'amber' ||
+		value === 'violet'
+	);
 }

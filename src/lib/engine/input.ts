@@ -11,6 +11,8 @@ export class InputState {
 	private shiftDown = false;
 	private mouseDx = 0;
 	private mouseDy = 0;
+	private lastConsumedMouseDx = 0;
+	private lastConsumedMouseDy = 0;
 	private wheelSteps = 0;
 
 	constructor(element: HTMLElement) {
@@ -48,9 +50,18 @@ export class InputState {
 
 	consumeMouseDelta(): { dx: number; dy: number } {
 		const delta = { dx: this.mouseDx, dy: this.mouseDy };
+		this.lastConsumedMouseDx = delta.dx;
+		this.lastConsumedMouseDy = delta.dy;
 		this.mouseDx = 0;
 		this.mouseDy = 0;
 		return delta;
+	}
+
+	getLastMouseDelta(): { dx: number; dy: number } {
+		return {
+			dx: this.lastConsumedMouseDx,
+			dy: this.lastConsumedMouseDy
+		};
 	}
 
 	consumeButtonPress(button: number): boolean {
@@ -215,6 +226,8 @@ export class InputState {
 		if (!this.pointerLocked) {
 			this.mouseDx = 0;
 			this.mouseDy = 0;
+			this.lastConsumedMouseDx = 0;
+			this.lastConsumedMouseDy = 0;
 			this.buttons.clear();
 			this.pressedButtons.clear();
 			this.releasedButtons.clear();
@@ -231,6 +244,8 @@ export class InputState {
 		this.shiftDown = false;
 		this.mouseDx = 0;
 		this.mouseDy = 0;
+		this.lastConsumedMouseDx = 0;
+		this.lastConsumedMouseDy = 0;
 		this.wheelSteps = 0;
 	};
 
