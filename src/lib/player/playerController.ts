@@ -15,11 +15,15 @@ const LOOK_SENSITIVITY = 0.0025;
 const WALK_SPEED = 14.2805 * DEFAULT_VOXEL_SIZE;
 const SPRINT_SPEED = 20.32225 * DEFAULT_VOXEL_SIZE;
 const CROUCH_SPEED = 8.925 * DEFAULT_VOXEL_SIZE;
+const FLY_SPEED = 18.5 * DEFAULT_VOXEL_SIZE;
+const FLY_BOOST_SPEED = 29 * DEFAULT_VOXEL_SIZE;
 const AIR_SPEED_FACTOR = 0.92;
 const GROUND_ACCELERATION = 110 * DEFAULT_VOXEL_SIZE;
 const GROUND_DECELERATION = 96 * DEFAULT_VOXEL_SIZE;
 const AIR_ACCELERATION = 42 * DEFAULT_VOXEL_SIZE;
 const AIR_DECELERATION = 18 * DEFAULT_VOXEL_SIZE;
+const FLY_ACCELERATION = 120 * DEFAULT_VOXEL_SIZE;
+const FLY_DECELERATION = 110 * DEFAULT_VOXEL_SIZE;
 const JUMP_VELOCITY = 18.5 * DEFAULT_VOXEL_SIZE;
 const GRAVITY = 40 * DEFAULT_VOXEL_SIZE;
 const FALL_GRAVITY_MULTIPLIER = 1.18;
@@ -41,6 +45,7 @@ export class PlayerController {
 	pitch = 0;
 	onGround = false;
 	isCrouching = false;
+	isFlying = false;
 
 	readonly width = PLAYER_WIDTH;
 	readonly standingHeight = PLAYER_STANDING_HEIGHT;
@@ -56,6 +61,7 @@ export class PlayerController {
 	private readonly moveVector = new THREE.Vector3();
 	private readonly forwardVector = new THREE.Vector3();
 	private readonly rightVector = new THREE.Vector3();
+	private readonly flyDirection = new THREE.Vector3();
 	private readonly boundsMin = new THREE.Vector3();
 	private readonly boundsMax = new THREE.Vector3();
 	private readonly occupancyCheckCollider: PlayerCollider = {
@@ -64,6 +70,7 @@ export class PlayerController {
 	};
 	private coyoteTimer = 0;
 	private jumpBufferTimer = 0;
+	private crouchToggleActive = false;
 
 	constructor(
 		private readonly world: VoxelWorld,
@@ -98,6 +105,19 @@ export class PlayerController {
 			);
 		}
 
+		if (this.input.consumeKeyPress('KeyG')) {
+			this.isFlying = !this.isFlying;
+			this.velocity.set(0, 0, 0);
+
+			if (this.isFlying) {
+				this.crouchToggleActive = false;
+				this.isCrouching = false;
+				this.collider.height = this.standingHeight;
+				this.eyeHeight = this.standingEyeHeight;
+				this.onGround = false;
+			}
+		}
+
 		this.updateCrouchState(dt);
 
 		this.moveVector.set(
@@ -105,6 +125,12 @@ export class PlayerController {
 			0,
 			(this.input.isKeyDown('KeyW') ? 1 : 0) - (this.input.isKeyDown('KeyS') ? 1 : 0)
 		);
+
+		if (this.isFlying) {
+			this.updateFlyMovement(dt);
+			this.syncCamera();
+			return;
+		}
 
 		this.coyoteTimer = this.onGround ? COYOTE_TIME_SECONDS : Math.max(0, this.coyoteTimer - dt);
 		this.jumpBufferTimer = Math.max(0, this.jumpBufferTimer - dt);
@@ -185,6 +211,10 @@ export class PlayerController {
 		return this.canPlaceBlockAt({ x: targetX, y: targetY, z: targetZ }, 1);
 	}
 
+	getPlacementStateSignature(): string {
+		return `${this.position.x.toFixed(2)},${this.position.y.toFixed(2)},${this.position.z.toFixed(2)},${this.collider.height.toFixed(2)}`;
+	}
+
 	canPlaceBlockAt(origin: WorldCoord, size: number): boolean {
 		getPlayerBounds(this.position, this.collider, this.boundsMin, this.boundsMax);
 
@@ -215,8 +245,23 @@ export class PlayerController {
 	}
 
 	private updateCrouchState(dt: number): void {
-		const wantsCrouch = this.input.isKeyDown('ControlLeft') || this.input.isKeyDown('ControlRight');
-		const shouldCrouch = wantsCrouch || !this.canOccupyHeight(this.standingHeight);
+		if (this.isFlying) {
+			this.input.consumeControlTap();
+			this.isCrouching = false;
+			this.collider.height = this.standingHeight;
+			this.eyeHeight = THREE.MathUtils.lerp(
+				this.eyeHeight,
+				this.standingEyeHeight,
+				1 - Math.exp(-CROUCH_TRANSITION_SPEED * dt)
+			);
+			return;
+		}
+
+		if (this.input.consumeControlTap()) {
+			this.crouchToggleActive = !this.crouchToggleActive;
+		}
+
+		const shouldCrouch = this.crouchToggleActive || !this.canOccupyHeight(this.standingHeight);
 		const targetHeight = shouldCrouch ? this.crouchHeight : this.standingHeight;
 		const targetEyeHeight = shouldCrouch ? this.crouchEyeHeight : this.standingEyeHeight;
 		const transitionAlpha = 1 - Math.exp(-CROUCH_TRANSITION_SPEED * dt);
@@ -230,6 +275,48 @@ export class PlayerController {
 		this.occupancyCheckCollider.height = height;
 		getPlayerBounds(this.position, this.occupancyCheckCollider, this.boundsMin, this.boundsMax);
 		return !intersectsSolid(this.world, this.boundsMin, this.boundsMax);
+	}
+
+	private updateFlyMovement(dt: number): void {
+		this.forwardVector.set(
+			-Math.sin(this.yaw) * Math.cos(this.pitch),
+			Math.sin(this.pitch),
+			-Math.cos(this.yaw) * Math.cos(this.pitch)
+		);
+		this.rightVector.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+		this.flyDirection.set(0, 0, 0);
+		this.flyDirection.addScaledVector(this.rightVector, this.moveVector.x);
+		this.flyDirection.addScaledVector(this.forwardVector, this.moveVector.z);
+		this.flyDirection.y +=
+			(this.input.isKeyDown('Space') ? 1 : 0) -
+			(this.input.isKeyDown('ControlLeft') || this.input.isKeyDown('ControlRight') ? 1 : 0);
+
+		if (this.flyDirection.lengthSq() > 0) {
+			this.flyDirection.normalize();
+			const flySpeed = this.input.isShiftDown() ? FLY_BOOST_SPEED : FLY_SPEED;
+			this.velocity.x = moveToward(
+				this.velocity.x,
+				this.flyDirection.x * flySpeed,
+				FLY_ACCELERATION * dt
+			);
+			this.velocity.y = moveToward(
+				this.velocity.y,
+				this.flyDirection.y * flySpeed,
+				FLY_ACCELERATION * dt
+			);
+			this.velocity.z = moveToward(
+				this.velocity.z,
+				this.flyDirection.z * flySpeed,
+				FLY_ACCELERATION * dt
+			);
+		} else {
+			this.velocity.x = moveToward(this.velocity.x, 0, FLY_DECELERATION * dt);
+			this.velocity.y = moveToward(this.velocity.y, 0, FLY_DECELERATION * dt);
+			this.velocity.z = moveToward(this.velocity.z, 0, FLY_DECELERATION * dt);
+		}
+
+		this.position.addScaledVector(this.velocity, dt);
+		this.onGround = false;
 	}
 }
 

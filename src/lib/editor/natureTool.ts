@@ -1,5 +1,6 @@
 import type { EditorTool, EditorToolContext } from '$lib/editor/editorTool';
 import {
+	placeNatureBush,
 	paintNatureFlowers,
 	paintNatureGrass,
 	placeNatureTree,
@@ -10,11 +11,11 @@ import type { VoxelHit } from '$lib/voxel/voxelRaycast';
 
 export class NatureTool implements EditorTool {
 	private lastAppliedKey: string | null = null;
-	private placedTreeThisStroke = false;
+	private placedStampThisStroke = false;
 
 	begin(context: EditorToolContext, hit: VoxelHit | null): void {
 		this.lastAppliedKey = null;
-		this.placedTreeThisStroke = false;
+		this.placedStampThisStroke = false;
 		this.apply(context, hit);
 	}
 
@@ -24,20 +25,26 @@ export class NatureTool implements EditorTool {
 
 	end(): void {
 		this.lastAppliedKey = null;
-		this.placedTreeThisStroke = false;
+		this.placedStampThisStroke = false;
 	}
 
 	private apply(context: EditorToolContext, hit: VoxelHit | null): void {
 		const natureState = getNatureUiState();
 
-		if (context.editorState.activeTool === 'nature-tree') {
-			if (this.placedTreeThisStroke) {
+		if (
+			context.editorState.activeTool === 'nature-tree' ||
+			context.editorState.activeTool === 'nature-bush'
+		) {
+			if (this.placedStampThisStroke) {
 				return;
 			}
 
-			const result = placeNatureTree(context.world, context.player, hit, natureState.treeSettings);
+			const result =
+				context.editorState.activeTool === 'nature-bush'
+					? placeNatureBush(context.world, context.player, hit, natureState.bushSettings)
+					: placeNatureTree(context.world, context.player, hit, natureState.treeSettings);
 
-			this.placedTreeThisStroke = true;
+			this.placedStampThisStroke = true;
 
 			if (result.changedVoxelCount > 0) {
 				context.commit(result);

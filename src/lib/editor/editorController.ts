@@ -22,9 +22,10 @@ import type { EditorTool, EditorToolContext } from '$lib/editor/editorTool';
 import { createPreviewBox, getToolTargetCoord } from '$lib/editor/editorTargets';
 import { InputState } from '$lib/engine/input';
 import {
+	buildNatureBushPreview,
 	buildNatureTreePreview,
 	resolveNatureGroundAnchor,
-	type NatureTreePreview
+	type NatureStructurePreview
 } from '$lib/nature/natureGeneration';
 import { getNatureBrushPreviewScale, getNatureGridCenterOffset } from '$lib/nature/natureGrid';
 import type { NatureActiveTool, NatureEditorTool } from '$lib/nature/natureTypes';
@@ -238,6 +239,8 @@ export class EditorController {
 	private lastExtrudeFacePreviewSignature: string | null = null;
 	private lastExtrudePreviewSignature: string | null = null;
 	private lastNatureTreePreviewSignature: string | null = null;
+	private cachedNaturePreviewRequestKey: string | null = null;
+	private cachedNaturePreview: NatureStructurePreview | null = null;
 
 	private readonly targetHighlight: THREE.LineSegments;
 	private readonly boxPreviewWireframe: THREE.LineSegments;
@@ -419,6 +422,8 @@ export class EditorController {
 		switch (this.state.activeTool) {
 			case 'nature-grass':
 				return 'grass-paint';
+			case 'nature-bush':
+				return 'bush-place';
 			case 'nature-flower':
 				return 'flower-paint';
 			case 'nature-tree':
@@ -881,13 +886,8 @@ export class EditorController {
 			this.state.enabled &&
 			!this.state.selectionEnabled &&
 			!this.activePropPlacement &&
-			this.state.activeTool === 'nature-tree'
-				? buildNatureTreePreview(
-						this.world,
-						this.player,
-						this.state.hoverHit,
-						natureState.treeSettings
-					)
+			(this.state.activeTool === 'nature-tree' || this.state.activeTool === 'nature-bush')
+				? this.getCachedNatureStructurePreview(natureState)
 				: null;
 		const placementBox =
 			this.state.enabled && !this.state.selectionEnabled && !this.isNatureToolActive()
@@ -1428,7 +1428,7 @@ export class EditorController {
 		this.cancelPropPlacement();
 	}
 
-	private syncNatureTreePreview(preview: NatureTreePreview): void {
+	private syncNatureTreePreview(preview: NatureStructurePreview): void {
 		if (preview.signature !== this.lastNatureTreePreviewSignature) {
 			clearGroupChildren(this.natureTreePreviewRoot);
 
@@ -1453,6 +1453,46 @@ export class EditorController {
 		this.natureTreePreviewWireMaterial.color.copy(previewColor);
 	}
 
+	private getCachedNatureStructurePreview(
+		natureState: ReturnType<typeof getNatureUiState>
+	): NatureStructurePreview | null {
+		const anchor = resolveNatureGroundAnchor(this.world, this.state.hoverHit);
+
+		if (!anchor) {
+			return null;
+		}
+
+		const worldVersion = this.world.getMutationVersion();
+		const playerSignature = this.player.getPlacementStateSignature();
+		const requestKey =
+			this.state.activeTool === 'nature-bush'
+				? `nature-bush:${worldVersion}:${playerSignature}:${anchor.x},${anchor.surfaceY},${anchor.z}:${natureState.bushSettings.size}:${natureState.bushSettings.density}:${natureState.bushSettings.seedOffset}`
+				: `nature-tree:${worldVersion}:${playerSignature}:${anchor.x},${anchor.surfaceY},${anchor.z}:${natureState.treeSettings.size}:${natureState.treeSettings.seedOffset}`;
+
+		if (requestKey === this.cachedNaturePreviewRequestKey && this.cachedNaturePreview) {
+			return this.cachedNaturePreview;
+		}
+
+		const preview =
+			this.state.activeTool === 'nature-bush'
+				? buildNatureBushPreview(
+						this.world,
+						this.player,
+						this.state.hoverHit,
+						natureState.bushSettings
+					)
+				: buildNatureTreePreview(
+						this.world,
+						this.player,
+						this.state.hoverHit,
+						natureState.treeSettings
+					);
+
+		this.cachedNaturePreviewRequestKey = requestKey;
+		this.cachedNaturePreview = preview;
+		return preview;
+	}
+
 	private cancelPropPlacement(reopenManager = false): void {
 		this.activePropPlacement = null;
 		this.transformControls.detach();
@@ -1471,6 +1511,7 @@ export class EditorController {
 	private isNatureToolActive(): boolean {
 		return (
 			this.state.activeTool === 'nature-grass' ||
+			this.state.activeTool === 'nature-bush' ||
 			this.state.activeTool === 'nature-flower' ||
 			this.state.activeTool === 'nature-tree'
 		);

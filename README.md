@@ -31,7 +31,10 @@ Click the viewport to capture the mouse. Press `Tab` or `F1` to toggle edit mode
 
 - `W A S D`: move
 - `Shift`: sprint
+- `G`: toggle fly mode
+- `Ctrl`: toggle crouch
 - `Space`: jump
+- While flying: `Space` rises and `Ctrl` descends
 
 ### Build Tools
 
@@ -43,6 +46,9 @@ Click the viewport to capture the mouse. Press `Tab` or `F1` to toggle edit mode
 - `H`: box hollow
 - `C`: box carve
 - `Shift + drag`: region drag with the active brush tool
+- `T`: quick-arm the last nature preset
+- Hold `T`: open the nature wheel for grass, flowers, bushes, and trees
+- `N`: open the nature tuning panel
 
 ### Build Selection
 

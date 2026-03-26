@@ -11,6 +11,15 @@ export interface VoxelSurfaceLightingState {
 	fogFar: number;
 	heightFogStrength: number;
 	heightFogFalloff: number;
+	giEnabled: boolean;
+	giAtlas: THREE.DataTexture;
+	giAtlasSize: THREE.Vector2;
+	giWorldOrigin: THREE.Vector3;
+	giVolumeSize: THREE.Vector3;
+	giCellSize: number;
+	giIntensity: number;
+	giClassicBounceScale: number;
+	giVisibilityFloor: number;
 }
 
 interface VoxelSurfaceUniforms {
@@ -21,6 +30,15 @@ interface VoxelSurfaceUniforms {
 	uGroundColor: { value: THREE.Color };
 	uFogHeightStrength: { value: number };
 	uFogHeightFalloff: { value: number };
+	uGiEnabled: { value: number };
+	uGiAtlas: { value: THREE.DataTexture };
+	uGiAtlasSize: { value: THREE.Vector2 };
+	uGiWorldOrigin: { value: THREE.Vector3 };
+	uGiVolumeSize: { value: THREE.Vector3 };
+	uGiCellSize: { value: number };
+	uGiIntensity: { value: number };
+	uGiClassicBounceScale: { value: number };
+	uGiVisibilityFloor: { value: number };
 }
 
 export interface VoxelSurfaceMaterial extends THREE.MeshStandardMaterial {
@@ -52,7 +70,7 @@ export function createVoxelSurfaceMaterial(options?: {
 		shader.fragmentShader = patchFragmentShader(shader.fragmentShader);
 	};
 	material.customProgramCacheKey = () =>
-		transparent ? 'voxel-surface-material-transparent-v1' : 'voxel-surface-material-opaque-v1';
+		transparent ? 'voxel-surface-material-transparent-v3' : 'voxel-surface-material-opaque-v3';
 
 	return material;
 }
@@ -70,9 +88,34 @@ export function syncVoxelSurfaceMaterial(
 	uniforms.uGroundColor.value.copy(lighting.groundColor);
 	uniforms.uFogHeightStrength.value = lighting.heightFogStrength;
 	uniforms.uFogHeightFalloff.value = lighting.heightFogFalloff;
+	uniforms.uGiEnabled.value = lighting.giEnabled ? 1 : 0;
+	uniforms.uGiAtlas.value = lighting.giAtlas;
+	uniforms.uGiAtlasSize.value.copy(lighting.giAtlasSize);
+	uniforms.uGiWorldOrigin.value.copy(lighting.giWorldOrigin);
+	uniforms.uGiVolumeSize.value.copy(lighting.giVolumeSize);
+	uniforms.uGiCellSize.value = lighting.giCellSize;
+	uniforms.uGiIntensity.value = lighting.giIntensity;
+	uniforms.uGiClassicBounceScale.value = lighting.giClassicBounceScale;
+	uniforms.uGiVisibilityFloor.value = lighting.giVisibilityFloor;
 }
 
 function createVoxelSurfaceUniforms(): VoxelSurfaceUniforms {
+	const giAtlas = new THREE.DataTexture(
+		new Uint8Array([0, 0, 0, 255]),
+		1,
+		1,
+		THREE.RGBAFormat,
+		THREE.UnsignedByteType
+	);
+
+	giAtlas.minFilter = THREE.LinearFilter;
+	giAtlas.magFilter = THREE.LinearFilter;
+	giAtlas.wrapS = THREE.ClampToEdgeWrapping;
+	giAtlas.wrapT = THREE.ClampToEdgeWrapping;
+	giAtlas.generateMipmaps = false;
+	giAtlas.unpackAlignment = 1;
+	giAtlas.needsUpdate = true;
+
 	return {
 		uSunDirection: { value: new THREE.Vector3(0.42, 0.84, 0.34).normalize() },
 		uSunColor: { value: new THREE.Color('#ffe2bd') },
@@ -80,7 +123,16 @@ function createVoxelSurfaceUniforms(): VoxelSurfaceUniforms {
 		uSkyColor: { value: new THREE.Color('#d5e7ef') },
 		uGroundColor: { value: new THREE.Color('#8d8174') },
 		uFogHeightStrength: { value: 0.18 },
-		uFogHeightFalloff: { value: 0.18 }
+		uFogHeightFalloff: { value: 0.18 },
+		uGiEnabled: { value: 0 },
+		uGiAtlas: { value: giAtlas },
+		uGiAtlasSize: { value: new THREE.Vector2(1, 1) },
+		uGiWorldOrigin: { value: new THREE.Vector3() },
+		uGiVolumeSize: { value: new THREE.Vector3(1, 1, 1) },
+		uGiCellSize: { value: 1 },
+		uGiIntensity: { value: 0 },
+		uGiClassicBounceScale: { value: 0.26 },
+		uGiVisibilityFloor: { value: 0.18 }
 	};
 }
 
@@ -119,10 +171,69 @@ uniform vec3 uSkyColor;
 uniform vec3 uGroundColor;
 uniform float uFogHeightStrength;
 uniform float uFogHeightFalloff;
+uniform float uGiEnabled;
+uniform sampler2D uGiAtlas;
+uniform vec2 uGiAtlasSize;
+uniform vec3 uGiWorldOrigin;
+uniform vec3 uGiVolumeSize;
+uniform float uGiCellSize;
+uniform float uGiIntensity;
+uniform float uGiClassicBounceScale;
+uniform float uGiVisibilityFloor;
 varying float vVoxelAo;
 varying vec4 vVoxelSurface;
 varying vec3 vVoxelEmissive;
-varying vec3 vVoxelWorldPosition;`
+varying vec3 vVoxelWorldPosition;
+
+vec4 sampleGiAtlasCell( vec3 cellCoord ) {
+	vec3 clampedCell = clamp( cellCoord, vec3( 0.0 ), uGiVolumeSize - vec3( 1.0 ) );
+	float atlasX = clampedCell.x + clampedCell.z * uGiVolumeSize.x;
+	vec2 atlasUv = vec2(
+		( atlasX + 0.5 ) / max( uGiAtlasSize.x, 1.0 ),
+		( clampedCell.y + 0.5 ) / max( uGiAtlasSize.y, 1.0 )
+	);
+	return texture2D( uGiAtlas, atlasUv );
+}
+
+vec4 sampleGiVolume( vec3 worldPosition ) {
+	if ( uGiEnabled < 0.5 ) {
+		return vec4( 0.0, 0.0, 0.0, 1.0 );
+	}
+
+	float cellSize = max( uGiCellSize, 0.0001 );
+	vec3 cellPosition = ( worldPosition - uGiWorldOrigin ) / cellSize;
+
+	if ( any( lessThan( cellPosition, vec3( 0.0 ) ) ) || any( greaterThan( cellPosition, uGiVolumeSize ) ) ) {
+		return vec4( 0.0, 0.0, 0.0, 1.0 );
+	}
+
+	vec3 voxelPosition = cellPosition - vec3( 0.5 );
+	vec3 baseCell = floor( voxelPosition );
+	vec3 cellBlend = fract( voxelPosition );
+	vec4 x00 = mix(
+		sampleGiAtlasCell( baseCell + vec3( 0.0, 0.0, 0.0 ) ),
+		sampleGiAtlasCell( baseCell + vec3( 1.0, 0.0, 0.0 ) ),
+		cellBlend.x
+	);
+	vec4 x10 = mix(
+		sampleGiAtlasCell( baseCell + vec3( 0.0, 1.0, 0.0 ) ),
+		sampleGiAtlasCell( baseCell + vec3( 1.0, 1.0, 0.0 ) ),
+		cellBlend.x
+	);
+	vec4 x01 = mix(
+		sampleGiAtlasCell( baseCell + vec3( 0.0, 0.0, 1.0 ) ),
+		sampleGiAtlasCell( baseCell + vec3( 1.0, 0.0, 1.0 ) ),
+		cellBlend.x
+	);
+	vec4 x11 = mix(
+		sampleGiAtlasCell( baseCell + vec3( 0.0, 1.0, 1.0 ) ),
+		sampleGiAtlasCell( baseCell + vec3( 1.0, 1.0, 1.0 ) ),
+		cellBlend.x
+	);
+	vec4 z0 = mix( x00, x01, cellBlend.z );
+	vec4 z1 = mix( x10, x11, cellBlend.z );
+	return mix( z0, z1, cellBlend.y );
+}`
 		)
 		.replace(
 			'#include <roughnessmap_fragment>',
@@ -144,16 +255,23 @@ vec3 sunDirection = normalize( uSunDirection );
 float skyMask = saturate( voxelWorldNormal.y * 0.5 + 0.5 );
 float groundMask = 1.0 - skyMask;
 float sunWrap = saturate( dot( voxelWorldNormal, sunDirection ) * 0.45 + 0.55 );
+float giBlend = clamp( uGiEnabled, 0.0, 1.0 );
+vec4 giSample = sampleGiVolume( vVoxelWorldPosition );
+float giVisibility = mix( 1.0, clamp( giSample.a, uGiVisibilityFloor, 1.0 ), giBlend );
+float giMaterialScale = mix( 0.55, 1.0, saturate( diffuseColor.a ) );
 reflectedLight.directDiffuse *= mix( 0.82, 1.0, voxelAo );
-reflectedLight.indirectDiffuse *= mix( 0.52, 1.0, voxelAo );
-reflectedLight.indirectSpecular *= mix( 0.86, 1.0, voxelAo );
+reflectedLight.indirectDiffuse *= mix( 0.52, 1.0, voxelAo ) * giVisibility;
+reflectedLight.indirectSpecular *= mix( 0.86, 1.0, voxelAo ) * mix( 1.0, giVisibility, 0.65 );
 vec3 bounceLight =
 	uSkyColor * ( 0.028 + 0.092 * skyMask ) +
 	uGroundColor * ( 0.022 + 0.088 * groundMask * ( 0.6 + cavity * 0.4 ) ) +
 	uSunColor * ( 0.012 + 0.028 * sunWrap ) * uSunIntensity;
-reflectedLight.indirectDiffuse += diffuseColor.rgb * bounceLight * vVoxelSurface.z * voxelAo;
+vec3 classicBounce = bounceLight * mix( 1.0, uGiClassicBounceScale, giBlend );
+vec3 giBounce = giSample.rgb * uGiIntensity * giMaterialScale;
+reflectedLight.indirectDiffuse += diffuseColor.rgb * classicBounce * vVoxelSurface.z * voxelAo;
+reflectedLight.indirectDiffuse += diffuseColor.rgb * giBounce * vVoxelSurface.z * voxelAo;
 vec3 cavityTint = mix( uGroundColor, uSkyColor, 0.2 + skyMask * 0.45 );
-reflectedLight.indirectDiffuse += diffuseColor.rgb * cavityTint * cavity * 0.04;
+reflectedLight.indirectDiffuse += diffuseColor.rgb * cavityTint * cavity * mix( 0.04, 0.015, giBlend );
 totalEmissiveRadiance += vVoxelEmissive * ( 0.18 + cavity * 0.12 );`
 		)
 		.replace(

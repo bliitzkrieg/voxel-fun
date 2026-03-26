@@ -9,6 +9,7 @@ import {
 } from '$lib/nature/natureGrid';
 import { getNatureMaterialSet } from '$lib/nature/natureMaterials';
 import type {
+	NatureBushSettings,
 	NatureFlowerColorMode,
 	NatureFlowerSettings,
 	NatureGrassHeightVariance,
@@ -35,6 +36,7 @@ const FLOWER_MAX_STEM_HEIGHT = 4;
 const GROUND_SEARCH_UP = natureUnitsToWorld(4);
 const GROUND_SEARCH_DOWN = natureUnitsToWorld(14);
 const TREE_SCALE = 2.5;
+const BUSH_SCALE = 2;
 const MAX_GRASS_CLEAR_HEIGHT = MAX_GRASS_HEIGHT * NATURE_BASE_VOXEL_SIZE + NATURE_BASE_VOXEL_SIZE;
 const MAX_FLOWER_CLEAR_HEIGHT = FLOWER_MAX_STEM_HEIGHT * NATURE_BASE_VOXEL_SIZE + 4;
 
@@ -50,7 +52,7 @@ export interface GeneratedNatureVoxel {
 	size: number;
 }
 
-export interface NatureTreePreview {
+export interface NatureStructurePreview {
 	anchor: NatureGroundAnchor | null;
 	blocks: GeneratedNatureVoxel[];
 	valid: boolean;
@@ -184,8 +186,25 @@ export function buildNatureTreePreview(
 	player: PlayerController,
 	hit: VoxelHit | null,
 	settings: NatureTreeSettings
-): NatureTreePreview {
+): NatureStructurePreview {
 	const placement = buildTreePlacement(world, player, hit, settings);
+
+	return {
+		anchor: placement.anchor,
+		blocks: placement.blocks,
+		valid: placement.valid,
+		signature: placement.signature,
+		bounds: placement.bounds
+	};
+}
+
+export function buildNatureBushPreview(
+	world: VoxelWorld,
+	player: PlayerController,
+	hit: VoxelHit | null,
+	settings: NatureBushSettings
+): NatureStructurePreview {
+	const placement = buildBushPlacement(world, player, hit, settings);
 
 	return {
 		anchor: placement.anchor,
@@ -203,6 +222,40 @@ export function placeNatureTree(
 	settings: NatureTreeSettings
 ): VoxelCommandResult {
 	const placement = buildTreePlacement(world, player, hit, settings);
+	const result = createVoxelCommandResult();
+
+	if (!placement.valid) {
+		return result;
+	}
+
+	for (const blockId of placement.removableBlockIds) {
+		const removedBlock = world.removeBlockById(blockId);
+
+		if (removedBlock) {
+			recordChangedBlock(world, removedBlock, result);
+		}
+	}
+
+	for (const block of placement.blocks) {
+		const placedBlock = world.placeBlock(block.origin, block.size, block.materialId);
+
+		if (!placedBlock) {
+			return result;
+		}
+
+		recordChangedBlock(world, placedBlock, result);
+	}
+
+	return result;
+}
+
+export function placeNatureBush(
+	world: VoxelWorld,
+	player: PlayerController,
+	hit: VoxelHit | null,
+	settings: NatureBushSettings
+): VoxelCommandResult {
+	const placement = buildBushPlacement(world, player, hit, settings);
 	const result = createVoxelCommandResult();
 
 	if (!placement.valid) {
@@ -475,6 +528,421 @@ function buildTreePlacement(
 			: null,
 		bounds: blocks.length > 0 ? computeBounds(blocks) : null
 	};
+}
+
+function buildBushPlacement(
+	world: VoxelWorld,
+	player: PlayerController,
+	hit: VoxelHit | null,
+	settings: NatureBushSettings
+): {
+	anchor: NatureGroundAnchor | null;
+	blocks: GeneratedNatureVoxel[];
+	valid: boolean;
+	removableBlockIds: Set<number>;
+	signature: string | null;
+	bounds: WorldBox | null;
+} {
+	const anchor = resolveNatureGroundAnchor(world, hit);
+	const leafMaterialIds = getNatureMaterialIds('leaf');
+	const barkMaterialIds = getNatureMaterialIds('bark');
+
+	if (!anchor || leafMaterialIds.length === 0 || barkMaterialIds.length === 0) {
+		return {
+			anchor,
+			blocks: [],
+			valid: false,
+			removableBlockIds: new Set<number>(),
+			signature: null,
+			bounds: null
+		};
+	}
+
+	const seed = hashInt(
+		getNatureGridValue(anchor.x),
+		getNatureGridValue(anchor.surfaceY),
+		getNatureGridValue(anchor.z),
+		settings.seedOffset + 509
+	);
+	const baseY = anchor.surfaceY + 1;
+	const stemHeight = pickBushStemHeight(settings.size, seed);
+	const canopyRadius = pickBushCanopyRadius(settings.size, seed);
+	const canopyWidthRadius = canopyRadius + Math.max(1, Math.round(canopyRadius * 0.18));
+	const canopyRadiusY = Math.max(3, Math.round(canopyRadius * 0.62));
+	const canopyLift = Math.max(stemHeight + 1, canopyRadiusY + 2);
+	const lowerCanopyLift = Math.max(
+		stemHeight,
+		canopyLift - Math.max(1, Math.round(canopyRadiusY * 0.22))
+	);
+	const upperCanopyLift = canopyLift + Math.max(1, Math.round(canopyRadiusY * 0.18));
+	const skirtLift = Math.max(
+		stemHeight,
+		canopyLift - Math.max(1, Math.round(canopyRadiusY * 0.45))
+	);
+	const lobeCount = pickBushLobeCount(settings.density, seed);
+	const woodBlocks = new Map<string, GeneratedNatureVoxel>();
+	const leafBlocks = new Map<string, GeneratedNatureVoxel>();
+	const rotatedDirections = rotateBushDirections(Math.abs(seed) % BUSH_CLUSTER_DIRECTIONS.length);
+	const trunkTopLayer = Math.max(0, stemHeight - 1);
+	for (let layer = 0; layer < stemHeight; layer += 1) {
+		const y = baseY + natureUnitsToWorld(layer);
+		const toneOffset = layer >= stemHeight - 1 ? 1 : 0;
+		setGeneratedBlock(
+			woodBlocks,
+			{ x: anchor.x, y, z: anchor.z },
+			pickToneMaterialId(barkMaterialIds, toneOffset)
+		);
+
+		if (layer !== 0 || canopyRadius < 4) {
+			continue;
+		}
+
+		for (let index = 0; index < 2; index += 1) {
+			const direction = rotatedDirections[index];
+
+			if (
+				!direction ||
+				hash01(anchor.x + direction.x, y, anchor.z + direction.z, seed + 547 + index * 19) < 0.42
+			) {
+				continue;
+			}
+
+			setGeneratedBlock(
+				woodBlocks,
+				{
+					x: anchor.x + natureUnitsToWorld(direction.x),
+					y,
+					z: anchor.z + natureUnitsToWorld(direction.z)
+				},
+				pickToneMaterialId(barkMaterialIds, 0)
+			);
+		}
+	}
+
+	for (let layer = stemHeight; layer <= lowerCanopyLift; layer += 1) {
+		setGeneratedBlock(
+			woodBlocks,
+			{ x: anchor.x, y: baseY + natureUnitsToWorld(layer), z: anchor.z },
+			pickToneMaterialId(barkMaterialIds, layer >= lowerCanopyLift ? 1 : 0)
+		);
+	}
+
+	const foliageSpheres: Array<{ center: WorldCoord; radius: number }> = [
+		{
+			center: { x: anchor.x, y: baseY + natureUnitsToWorld(canopyLift), z: anchor.z },
+			radius: canopyWidthRadius
+		},
+		{
+			center: {
+				x: anchor.x,
+				y: baseY + natureUnitsToWorld(lowerCanopyLift),
+				z: anchor.z
+			},
+			radius: Math.max(3, canopyWidthRadius - 1)
+		},
+		{
+			center: {
+				x: anchor.x,
+				y: baseY + natureUnitsToWorld(upperCanopyLift),
+				z: anchor.z
+			},
+			radius: Math.max(3, canopyWidthRadius - 2)
+		}
+	];
+
+	const skirtDirections = rotateCardinalDirections(Math.abs(seed) % 4);
+	const supportCount = Math.min(
+		skirtDirections.length,
+		settings.density === 'lush' ? 3 : settings.density === 'balanced' ? 2 : 1
+	);
+
+	for (let index = 0; index < supportCount; index += 1) {
+		const direction = skirtDirections[(index * 2) % skirtDirections.length];
+
+		if (!direction) {
+			continue;
+		}
+
+		const supportReach = Math.max(2, Math.round(canopyWidthRadius * (index === 0 ? 0.54 : 0.44)));
+		const supportTopLayer = Math.max(stemHeight, lowerCanopyLift - 1 + (index % 2));
+
+		for (let step = 0; step <= supportReach; step += 1) {
+			const t = step / supportReach;
+			const distance = supportReach - step;
+			const supportOrigin = {
+				x: anchor.x + natureUnitsToWorld(direction.x * distance),
+				y: baseY + natureUnitsToWorld(Math.round(mix(0, supportTopLayer, t))),
+				z: anchor.z + natureUnitsToWorld(direction.z * distance)
+			};
+
+			setGeneratedBlock(
+				woodBlocks,
+				supportOrigin,
+				pickToneMaterialId(
+					barkMaterialIds,
+					step >= supportReach ? 1 : step > Math.round(supportReach * 0.55) ? 1 : 0
+				)
+			);
+
+			if (step < Math.round(supportReach * 0.55)) {
+				continue;
+			}
+
+			foliageSpheres.push({
+				center: {
+					x: supportOrigin.x,
+					y: supportOrigin.y + NATURE_BASE_VOXEL_SIZE,
+					z: supportOrigin.z
+				},
+				radius: Math.max(2, Math.round(canopyWidthRadius * 0.24))
+			});
+		}
+	}
+
+	for (let index = 0; index < skirtDirections.length; index += 1) {
+		const direction = skirtDirections[index];
+
+		if (!direction) {
+			continue;
+		}
+
+		const skirtReach = Math.max(2, canopyWidthRadius - 1);
+		foliageSpheres.push({
+			center: {
+				x: anchor.x + natureUnitsToWorld(direction.x * skirtReach),
+				y: baseY + natureUnitsToWorld(skirtLift + (index % 2 === 0 ? 0 : 1)),
+				z: anchor.z + natureUnitsToWorld(direction.z * skirtReach)
+			},
+			radius: Math.max(3, canopyWidthRadius - 2)
+		});
+	}
+
+	for (let index = 0; index < lobeCount; index += 1) {
+		const direction = rotatedDirections[index % rotatedDirections.length];
+
+		if (!direction) {
+			continue;
+		}
+
+		const diagonal = direction.x !== 0 && direction.z !== 0;
+		const lobeReach = Math.max(3, Math.round(canopyWidthRadius * (diagonal ? 0.66 : 0.78)));
+		const branchLength = Math.max(2, Math.round(lobeReach * (diagonal ? 0.34 : 0.42)));
+		const tipLayer = Math.max(stemHeight, lowerCanopyLift + (diagonal ? 0 : 1) + (index % 2));
+		const lobeRadius = Math.max(3, canopyWidthRadius - (diagonal ? 2 : 1) - (index % 2));
+
+		for (let step = 1; step <= branchLength; step += 1) {
+			const branchNode = {
+				x: anchor.x + natureUnitsToWorld(direction.x * step),
+				y:
+					baseY +
+					natureUnitsToWorld(
+						Math.max(
+							trunkTopLayer,
+							stemHeight - 1 + Math.floor(step * 0.5) + (step >= branchLength ? 1 : 0)
+						)
+					),
+				z: anchor.z + natureUnitsToWorld(direction.z * step)
+			};
+
+			setGeneratedBlock(
+				woodBlocks,
+				branchNode,
+				pickToneMaterialId(barkMaterialIds, step >= branchLength ? 1 : 0)
+			);
+
+			if (step === 1) {
+				continue;
+			}
+
+			foliageSpheres.push({
+				center: {
+					x: branchNode.x,
+					y: branchNode.y + (step >= branchLength ? 0 : NATURE_BASE_VOXEL_SIZE),
+					z: branchNode.z
+				},
+				radius: Math.max(2, Math.round(lobeRadius * 0.4))
+			});
+		}
+
+		const branchTip = {
+			x: anchor.x + natureUnitsToWorld(direction.x * branchLength),
+			y: baseY + natureUnitsToWorld(tipLayer),
+			z: anchor.z + natureUnitsToWorld(direction.z * branchLength)
+		};
+
+		setGeneratedBlock(woodBlocks, branchTip, pickToneMaterialId(barkMaterialIds, 1));
+
+		foliageSpheres.push({
+			center: {
+				x: anchor.x + natureUnitsToWorld(direction.x * lobeReach),
+				y: baseY + natureUnitsToWorld(tipLayer),
+				z: anchor.z + natureUnitsToWorld(direction.z * lobeReach)
+			},
+			radius: lobeRadius
+		});
+
+		foliageSpheres.push({
+			center: {
+				x: anchor.x + natureUnitsToWorld(direction.x * Math.max(1, Math.round(lobeReach * 0.55))),
+				y: baseY + natureUnitsToWorld(Math.max(lowerCanopyLift, tipLayer - 1)),
+				z: anchor.z + natureUnitsToWorld(direction.z * Math.max(1, Math.round(lobeReach * 0.55)))
+			},
+			radius: Math.max(3, lobeRadius - 1)
+		});
+
+		foliageSpheres.push({
+			center: {
+				x: anchor.x + natureUnitsToWorld(direction.x * Math.max(2, Math.round(lobeReach * 0.88))),
+				y: baseY + natureUnitsToWorld(Math.max(lowerCanopyLift, tipLayer)),
+				z: anchor.z + natureUnitsToWorld(direction.z * Math.max(2, Math.round(lobeReach * 0.88)))
+			},
+			radius: Math.max(3, lobeRadius - (diagonal ? 1 : 0))
+		});
+	}
+
+	addBushFoliageMass({
+		woodBlocks,
+		leafBlocks,
+		leafMaterialIds,
+		spheres: foliageSpheres,
+		groundY: baseY,
+		density: settings.density,
+		seed
+	});
+
+	const blocks = [...woodBlocks.values(), ...leafBlocks.values()];
+	const removableBlockIds = new Set<number>();
+	let valid = blocks.length > 0;
+
+	for (const block of blocks) {
+		if (!player.canPlaceBlockAt(block.origin, block.size)) {
+			valid = false;
+			break;
+		}
+
+		const overlappingBlocks = world.getOverlappingBlocks(block.origin, block.size);
+
+		if (overlappingBlocks.length === 0) {
+			continue;
+		}
+
+		for (const existingBlock of overlappingBlocks) {
+			if (isWaterVoxelMaterial(existingBlock.materialId)) {
+				valid = false;
+				break;
+			}
+
+			if (
+				isNatureGrassMaterial(existingBlock.materialId) ||
+				isNatureLeafMaterial(existingBlock.materialId) ||
+				isNatureFlowerMaterial(existingBlock.materialId)
+			) {
+				removableBlockIds.add(existingBlock.id);
+				continue;
+			}
+
+			valid = false;
+			break;
+		}
+
+		if (!valid) {
+			break;
+		}
+	}
+
+	return {
+		anchor,
+		blocks,
+		valid,
+		removableBlockIds,
+		signature: anchor
+			? `${anchor.x},${anchor.surfaceY},${anchor.z}:bush:${settings.size}:${settings.density}:${settings.seedOffset}`
+			: null,
+		bounds: blocks.length > 0 ? computeBounds(blocks) : null
+	};
+}
+
+function addBushFoliageMass(input: {
+	woodBlocks: Map<string, GeneratedNatureVoxel>;
+	leafBlocks: Map<string, GeneratedNatureVoxel>;
+	leafMaterialIds: number[];
+	spheres: Array<{ center: WorldCoord; radius: number }>;
+	groundY: number;
+	density: NatureBushSettings['density'];
+	seed: number;
+}): void {
+	const { woodBlocks, leafBlocks, leafMaterialIds, spheres, groundY, density, seed } = input;
+
+	if (spheres.length === 0) {
+		return;
+	}
+
+	const preparedSpheres = spheres.map((sphere) => ({
+		centerX: getNatureGridValue(sphere.center.x),
+		centerY: getNatureGridValue(sphere.center.y),
+		centerZ: getNatureGridValue(sphere.center.z),
+		radius: sphere.radius
+	}));
+	let minGridX = Number.POSITIVE_INFINITY;
+	let minGridY = Number.POSITIVE_INFINITY;
+	let minGridZ = Number.POSITIVE_INFINITY;
+	let maxGridX = Number.NEGATIVE_INFINITY;
+	let maxGridY = Number.NEGATIVE_INFINITY;
+	let maxGridZ = Number.NEGATIVE_INFINITY;
+
+	for (const sphere of preparedSpheres) {
+		minGridX = Math.min(minGridX, sphere.centerX - sphere.radius - 1);
+		minGridY = Math.min(minGridY, sphere.centerY - sphere.radius - 1);
+		minGridZ = Math.min(minGridZ, sphere.centerZ - sphere.radius - 1);
+		maxGridX = Math.max(maxGridX, sphere.centerX + sphere.radius + 1);
+		maxGridY = Math.max(maxGridY, sphere.centerY + sphere.radius + 1);
+		maxGridZ = Math.max(maxGridZ, sphere.centerZ + sphere.radius + 1);
+	}
+
+	const minAllowedGridY = getNatureGridValue(groundY);
+	const densityBias = density === 'lush' ? 0.36 : density === 'balanced' ? 0.14 : -0.08;
+	const noiseAmplitude = density === 'lush' ? 1.26 : density === 'balanced' ? 1.06 : 0.92;
+
+	for (let gridZ = minGridZ; gridZ <= maxGridZ; gridZ += 1) {
+		for (let gridY = Math.max(minGridY, minAllowedGridY); gridY <= maxGridY; gridY += 1) {
+			for (let gridX = minGridX; gridX <= maxGridX; gridX += 1) {
+				const origin = {
+					x: natureUnitsToWorld(gridX),
+					y: natureUnitsToWorld(gridY),
+					z: natureUnitsToWorld(gridZ)
+				};
+				const key = worldCoordKey(origin);
+
+				if (woodBlocks.has(key) || leafBlocks.has(key)) {
+					continue;
+				}
+
+				let signedDistance = Number.POSITIVE_INFINITY;
+
+				for (const sphere of preparedSpheres) {
+					const dx = gridX - sphere.centerX;
+					const dy = gridY - sphere.centerY;
+					const dz = gridZ - sphere.centerZ;
+					const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+					signedDistance = Math.min(signedDistance, distance - sphere.radius);
+				}
+
+				const surfaceNoise =
+					(hash01(gridX, gridY, gridZ, seed + 811) - 0.5) * noiseAmplitude + densityBias;
+				const edgeNoise = (hash01(gridX, gridY, gridZ, seed + 853) - 0.5) * 0.22;
+
+				if (signedDistance > surfaceNoise + edgeNoise) {
+					continue;
+				}
+
+				setGeneratedBlock(
+					leafBlocks,
+					origin,
+					pickMaterialId(leafMaterialIds, hash01(gridX, gridY, gridZ, seed + 887))
+				);
+			}
+		}
+	}
 }
 
 function buildTreeTrunk(input: {
@@ -1218,6 +1686,45 @@ function chooseWeightedHeight(
 	return weights[weights.length - 1]?.[0] ?? 1;
 }
 
+function pickBushStemHeight(settingsSize: NatureBushSettings['size'], seed: number): number {
+	const noise = hash01(seed, 0, 0, 233);
+
+	switch (settingsSize) {
+		case 'small':
+			return scaleBushMeasure(1 + Math.floor(noise * 2));
+		case 'large':
+			return scaleBushMeasure(2 + Math.floor(noise * 2));
+		default:
+			return scaleBushMeasure(2 + Math.floor(noise * 1.6));
+	}
+}
+
+function pickBushCanopyRadius(settingsSize: NatureBushSettings['size'], seed: number): number {
+	const noise = hash01(seed, 0, 0, 269);
+
+	switch (settingsSize) {
+		case 'small':
+			return scaleBushMeasure(2 + Math.floor(noise * 2));
+		case 'large':
+			return scaleBushMeasure(4 + Math.floor(noise * 2));
+		default:
+			return scaleBushMeasure(3 + Math.floor(noise * 2));
+	}
+}
+
+function pickBushLobeCount(settingsDensity: NatureBushSettings['density'], seed: number): number {
+	const noise = hash01(seed, 0, 0, 307);
+
+	switch (settingsDensity) {
+		case 'sparse':
+			return 3 + Math.floor(noise * 2);
+		case 'lush':
+			return 5 + Math.floor(noise * 3);
+		default:
+			return 4 + Math.floor(noise * 3);
+	}
+}
+
 function pickTreeHeight(settings: NatureTreeSettings, seed: number): number {
 	const noise = hash01(seed, 0, 0, 97);
 
@@ -1272,6 +1779,10 @@ function pickBranchLength(settings: NatureTreeSettings, seed: number): number {
 
 function scaleTreeMeasure(baseValue: number): number {
 	return Math.max(1, Math.round(baseValue * TREE_SCALE));
+}
+
+function scaleBushMeasure(baseValue: number): number {
+	return Math.max(1, Math.round(baseValue * BUSH_SCALE));
 }
 
 function computeBounds(blocks: ReadonlyArray<GeneratedNatureVoxel>): WorldBox {
@@ -1369,6 +1880,14 @@ function rotateCardinalDirections(offset: number): Array<{ x: number; z: number 
 	);
 }
 
+function rotateBushDirections(offset: number): Array<{ x: number; z: number }> {
+	return BUSH_CLUSTER_DIRECTIONS.map(
+		(_, index) =>
+			BUSH_CLUSTER_DIRECTIONS[(index + offset) % BUSH_CLUSTER_DIRECTIONS.length] ??
+			BUSH_CLUSTER_DIRECTIONS[0]!
+	);
+}
+
 function worldCoordKey(origin: WorldCoord): string {
 	return `${origin.x},${origin.y},${origin.z}`;
 }
@@ -1400,4 +1919,15 @@ const CARDINAL_DIRECTIONS_3D = [
 	new THREE.Vector3(0, 0, -1),
 	new THREE.Vector3(0, 1, 0),
 	new THREE.Vector3(0, -1, 0)
+];
+
+const BUSH_CLUSTER_DIRECTIONS = [
+	{ x: 1, z: 0 },
+	{ x: 1, z: 1 },
+	{ x: 0, z: 1 },
+	{ x: -1, z: 1 },
+	{ x: -1, z: 0 },
+	{ x: -1, z: -1 },
+	{ x: 0, z: -1 },
+	{ x: 1, z: -1 }
 ];

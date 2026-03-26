@@ -10,13 +10,16 @@ import { EmissiveLightManager } from '$lib/engine/emissiveLightManager';
 import { InputState } from '$lib/engine/input';
 import { FixedLoop } from '$lib/engine/loop';
 import { applySceneTimeOfDay, createGameScene, type SceneBundle } from '$lib/engine/scene';
+import { VoxelGiSystem, type VoxelGiLightingState } from '$lib/engine/voxelGiSystem';
 import {
 	createVoxelSurfaceMaterial,
 	syncVoxelSurfaceMaterial,
+	type VoxelSurfaceLightingState,
 	type VoxelSurfaceMaterial
 } from '$lib/engine/voxelSurfaceMaterial';
 import { ensureNatureMaterials } from '$lib/nature/natureMaterials';
 import type {
+	NatureBushSettings,
 	NatureFlowerSettings,
 	NatureGrassSettings,
 	NaturePreset,
@@ -30,9 +33,12 @@ import {
 } from '$lib/ui/materialManagerState';
 import {
 	clearNatureTool,
+	closeNatureRadial,
 	closeNaturePanel,
 	getNatureUiState,
+	openNatureRadial,
 	syncNatureTool,
+	updateNatureBushSettings as updateNatureBushUiSettings,
 	toggleNaturePanel,
 	updateNatureFlowerSettings as updateNatureFlowerUiSettings,
 	updateNatureGrassSettings as updateNatureGrassUiSettings,
@@ -84,9 +90,12 @@ const BULK_CHUNK_SYNC_PER_FRAME = 2;
 const BULK_CHUNK_SYNC_FRAME_BUDGET_MS = 2;
 const BACKGROUND_SHADOW_REFRESH_INTERVAL_MS = 125;
 const UNDO_IMMEDIATE_CHUNK_SYNC_LIMIT = 20;
+const NATURE_RADIAL_HOLD_MS = 220;
 const BLOOM_STRENGTH = 0.18;
 const BLOOM_RADIUS = 0.45;
 const BLOOM_THRESHOLD = 0.86;
+
+export type LightingMode = 'voxel-gi' | 'voxel-gi-stress' | 'classic';
 
 export class Game {
 	scene!: THREE.Scene;
@@ -112,6 +121,7 @@ export class Game {
 	private resizeObserver!: ResizeObserver;
 	private stats!: DebugStats;
 	private emissiveLightManager!: EmissiveLightManager;
+	private voxelGiSystem!: VoxelGiSystem;
 	private sceneBundle!: SceneBundle;
 	private readonly chunkBounds = new Map<ChunkKey, THREE.Object3D>();
 	private readonly pendingChunkSyncKeys = new Set<ChunkKey>();
@@ -126,8 +136,11 @@ export class Game {
 	private autoSaveHandle: number | null = null;
 	private materialManagerWasOpen = false;
 	private naturePanelWasOpen = false;
+	private natureRadialWasOpen = false;
 	private propManagerWasOpen = false;
 	private propPlacementWasActive = false;
+	private lightingMode: LightingMode = 'voxel-gi';
+	private natureRadialOpenedFromCurrentPress = false;
 
 	constructor(container: HTMLElement) {
 		this.container = container;
@@ -172,6 +185,8 @@ export class Game {
 
 		this.input = new InputState(this.renderer.domElement);
 		this.world = new VoxelWorld();
+		this.voxelGiSystem = new VoxelGiSystem(this.world);
+		this.applyLightingMode();
 		this.voxelOpaqueMaterial = createVoxelSurfaceMaterial();
 		this.voxelTransparentMaterial = createVoxelSurfaceMaterial({ transparent: true });
 		this.voxelWaterMaterial = createVoxelWaterMaterial();
@@ -199,6 +214,7 @@ export class Game {
 		this.stats = new DebugStats(this.container);
 
 		closeMaterialManager();
+		closeNatureRadial();
 		closeNaturePanel();
 		closePropManager();
 		clearNatureTool();
@@ -268,12 +284,14 @@ export class Game {
 		this.handleOverlayHotkeys();
 
 		const materialManagerOpen = getMaterialManagerUiState().open;
+		const natureUiState = getNatureUiState();
+		const natureOverlayOpen = natureUiState.open || natureUiState.radialOpen;
 		const propUiState = getPropUiState();
 		const propManagerOpen = propUiState.managerOpen;
 		const propPlacementActive = propUiState.placementActive;
 		let changedChunkKeys = new Set<ChunkKey>();
 
-		if (materialManagerOpen || propManagerOpen) {
+		if (materialManagerOpen || natureOverlayOpen || propManagerOpen) {
 			this.editor.resetTransientState();
 		} else if (propPlacementActive) {
 			this.player.update(dt);
@@ -288,6 +306,7 @@ export class Game {
 		if (changedChunkKeys.size > 0) {
 			this.pruneUnusedArchivedMaterials();
 			this.emissiveLightManager.invalidateCandidates();
+			this.voxelGiSystem.invalidateChunks(changedChunkKeys);
 		}
 
 		this.scheduleWorldSave(changedChunkKeys.size > 0);
@@ -297,6 +316,8 @@ export class Game {
 		this.lastDirtyChunkCount = this.pendingChunkSyncKeys.size + this.backgroundChunkSyncKeySet.size;
 		this.syncDirtyChunks();
 		this.emissiveLightManager.sync(this.world, this.camera.position);
+		this.refreshSunDirection();
+		this.voxelGiSystem.sync(this.camera.position, this.createGiLightingState());
 
 		const hoveredChunk = this.editor.getHoveredChunkCoord();
 		const selectedMaterial =
@@ -345,6 +366,7 @@ export class Game {
 		this.voxelWaterMaterial?.dispose();
 		this.voxelGlowMaterial?.dispose();
 		this.emissiveLightManager?.dispose();
+		this.voxelGiSystem?.dispose();
 		this.renderer?.dispose();
 		this.renderer?.domElement.remove();
 	}
@@ -395,6 +417,20 @@ export class Game {
 		return this.editor.getSelectedMaterialId();
 	}
 
+	getLightingMode(): LightingMode {
+		return this.lightingMode;
+	}
+
+	setLightingMode(mode: LightingMode): void {
+		if (this.lightingMode === mode) {
+			return;
+		}
+
+		this.lightingMode = mode;
+		this.applyLightingMode();
+		this.syncRenderMaterialUniforms();
+	}
+
 	selectMaterial(materialId: number): boolean {
 		return this.editor.setSelectedMaterial(materialId);
 	}
@@ -433,6 +469,7 @@ export class Game {
 
 		this.queueMaterialVisualRefresh(material.id);
 		this.emissiveLightManager.invalidateCandidates();
+		this.voxelGiSystem.invalidateAll();
 		this.flushWorldSave();
 		return true;
 	}
@@ -445,6 +482,7 @@ export class Game {
 		}
 
 		this.queueMaterialVisualRefresh(material.id);
+		this.voxelGiSystem.invalidateAll();
 		this.flushWorldSave();
 		return true;
 	}
@@ -495,11 +533,16 @@ export class Game {
 		this.ensureNaturePalette();
 		closeMaterialManager();
 		closePropManager();
+		closeNatureRadial();
 		closeNaturePanel();
 		switch (preset) {
 			case 'grass':
 				this.editor.startNatureTool('nature-grass');
 				syncNatureTool('grass-paint');
+				break;
+			case 'bushes':
+				this.editor.startNatureTool('nature-bush');
+				syncNatureTool('bush-place');
 				break;
 			case 'flowers':
 				this.editor.startNatureTool('nature-flower');
@@ -515,6 +558,7 @@ export class Game {
 	}
 
 	cancelNatureTool(): void {
+		closeNatureRadial();
 		this.editor.cancelNatureTool();
 		clearNatureTool();
 		this.updateViewportState();
@@ -522,6 +566,10 @@ export class Game {
 
 	updateNatureGrassSettings(input: Partial<NatureGrassSettings>): void {
 		updateNatureGrassUiSettings(input);
+	}
+
+	updateNatureBushSettings(input: Partial<NatureBushSettings>): void {
+		updateNatureBushUiSettings(input);
 	}
 
 	updateNatureFlowerSettings(input: Partial<NatureFlowerSettings>): void {
@@ -539,6 +587,7 @@ export class Game {
 		if (started) {
 			closeMaterialManager();
 			closePropManager();
+			closeNatureRadial();
 			closeNaturePanel();
 			this.updateViewportState();
 		}
@@ -571,6 +620,7 @@ export class Game {
 
 		this.editor.handleDeletedProp(propId);
 		this.queueChunkSync(affectedChunkKeys);
+		this.voxelGiSystem.invalidateChunks(affectedChunkKeys);
 		this.pruneUnusedArchivedMaterials();
 		this.flushWorldSave();
 		return true;
@@ -597,23 +647,28 @@ export class Game {
 	private updateViewportState(): void {
 		const crosshair = this.container.parentElement?.querySelector('.crosshair');
 		const materialManagerOpen = getMaterialManagerUiState().open;
-		const naturePanelOpen = getNatureUiState().open;
+		const natureUiState = getNatureUiState();
+		const naturePanelOpen = natureUiState.open;
+		const natureRadialOpen = natureUiState.radialOpen;
 		const propUiState = getPropUiState();
 		const hideReticle =
 			this.editor.state.enabled ||
 			materialManagerOpen ||
 			naturePanelOpen ||
+			natureRadialOpen ||
 			propUiState.managerOpen ||
 			propUiState.placementActive;
 		const suppressPointerLock =
 			materialManagerOpen ||
 			naturePanelOpen ||
+			natureRadialOpen ||
 			propUiState.managerOpen ||
 			propUiState.placementActive;
 		const enablePlacementFreeLook =
 			propUiState.placementActive &&
 			!materialManagerOpen &&
 			!naturePanelOpen &&
+			!natureRadialOpen &&
 			!propUiState.managerOpen;
 
 		this.input.setPointerLockSuppressed(suppressPointerLock);
@@ -698,6 +753,7 @@ export class Game {
 
 		this.ensureNaturePalette();
 		this.emissiveLightManager.invalidateCandidates();
+		this.voxelGiSystem.reset();
 		this.editor.ensureSelectedMaterialValid();
 		this.editor.resetTransientState();
 		if (options.preserveRenderedChunks) {
@@ -986,7 +1042,9 @@ export class Game {
 
 	private handleOverlayHotkeys(): void {
 		const materialManagerOpen = getMaterialManagerUiState().open;
-		const naturePanelOpen = getNatureUiState().open;
+		const natureUiState = getNatureUiState();
+		const naturePanelOpen = natureUiState.open;
+		const natureRadialOpen = natureUiState.radialOpen;
 		const propUiState = getPropUiState();
 		const propManagerOpen = propUiState.managerOpen;
 		const propPlacementActive = propUiState.placementActive;
@@ -997,30 +1055,29 @@ export class Game {
 		}
 
 		if (!ignoreToggleHotkey && !propPlacementActive && this.input.consumeKeyPress('KeyM')) {
+			closeNatureRadial();
 			closeNaturePanel();
 			closePropManager();
 			openMaterialManager();
 		}
 
 		if (!ignoreToggleHotkey && !propPlacementActive && this.input.consumeKeyPress('KeyN')) {
+			closeNatureRadial();
 			closeMaterialManager();
 			closePropManager();
 			toggleNaturePanel();
 		}
 
-		if (!ignoreToggleHotkey && !propPlacementActive && this.input.consumeKeyPress('KeyG')) {
-			this.activateNaturePreset('grass');
-		}
-
-		if (!ignoreToggleHotkey && !propPlacementActive && this.input.consumeKeyPress('KeyF')) {
-			this.activateNaturePreset('flowers');
-		}
-
-		if (!ignoreToggleHotkey && !propPlacementActive && this.input.consumeKeyPress('KeyT')) {
-			this.activateNaturePreset('trees');
-		}
+		this.handleNatureRadialHotkeys({
+			ignoreToggleHotkey,
+			materialManagerOpen,
+			naturePanelOpen,
+			propManagerOpen,
+			propPlacementActive
+		});
 
 		if (!ignoreToggleHotkey && !propPlacementActive && this.input.consumeKeyPress('KeyP')) {
+			closeNatureRadial();
 			closeMaterialManager();
 			closeNaturePanel();
 			openPropManager();
@@ -1035,24 +1092,33 @@ export class Game {
 				closeNaturePanel();
 			}
 
+			if (natureRadialOpen) {
+				closeNatureRadial();
+				this.natureRadialOpenedFromCurrentPress = false;
+			}
+
 			if (propManagerOpen) {
 				closePropManager();
 			}
 		}
 
 		const nextMaterialManagerOpen = getMaterialManagerUiState().open;
-		const nextNaturePanelOpen = getNatureUiState().open;
+		const nextNatureUiState = getNatureUiState();
+		const nextNaturePanelOpen = nextNatureUiState.open;
+		const nextNatureRadialOpen = nextNatureUiState.radialOpen;
 		const nextPropUiState = getPropUiState();
 		const nextPropManagerOpen = nextPropUiState.managerOpen;
 		const nextPropPlacementActive = nextPropUiState.placementActive;
 		const anyOverlayJustOpened =
 			(nextMaterialManagerOpen && !this.materialManagerWasOpen) ||
 			(nextNaturePanelOpen && !this.naturePanelWasOpen) ||
+			(nextNatureRadialOpen && !this.natureRadialWasOpen) ||
 			(nextPropManagerOpen && !this.propManagerWasOpen) ||
 			(nextPropPlacementActive && !this.propPlacementWasActive);
 		const anyOverlayJustClosed =
 			(!nextMaterialManagerOpen && this.materialManagerWasOpen) ||
 			(!nextNaturePanelOpen && this.naturePanelWasOpen) ||
+			(!nextNatureRadialOpen && this.natureRadialWasOpen) ||
 			(!nextPropManagerOpen && this.propManagerWasOpen) ||
 			(!nextPropPlacementActive && this.propPlacementWasActive);
 
@@ -1067,8 +1133,75 @@ export class Game {
 
 		this.materialManagerWasOpen = nextMaterialManagerOpen;
 		this.naturePanelWasOpen = nextNaturePanelOpen;
+		this.natureRadialWasOpen = nextNatureRadialOpen;
 		this.propManagerWasOpen = nextPropManagerOpen;
 		this.propPlacementWasActive = nextPropPlacementActive;
+	}
+
+	private handleNatureRadialHotkeys(input: {
+		ignoreToggleHotkey: boolean;
+		materialManagerOpen: boolean;
+		naturePanelOpen: boolean;
+		propManagerOpen: boolean;
+		propPlacementActive: boolean;
+	}): void {
+		const blocked =
+			input.ignoreToggleHotkey ||
+			input.materialManagerOpen ||
+			input.naturePanelOpen ||
+			input.propManagerOpen ||
+			input.propPlacementActive;
+		const natureUiState = getNatureUiState();
+
+		if (blocked) {
+			if (natureUiState.radialOpen) {
+				closeNatureRadial();
+			}
+
+			if (this.input.consumeKeyRelease('KeyT')) {
+				this.natureRadialOpenedFromCurrentPress = false;
+			}
+
+			return;
+		}
+
+		if (
+			this.input.isKeyDown('KeyT') &&
+			this.input.getKeyHoldDuration('KeyT') >= NATURE_RADIAL_HOLD_MS &&
+			!natureUiState.radialOpen
+		) {
+			openNatureRadial();
+			this.natureRadialOpenedFromCurrentPress = true;
+			this.input.exitPointerLock();
+			this.editor.resetTransientState();
+			return;
+		}
+
+		if (!this.input.consumeKeyRelease('KeyT')) {
+			return;
+		}
+
+		const nextNatureUiState = getNatureUiState();
+
+		if (nextNatureUiState.radialOpen) {
+			const selectedPreset = nextNatureUiState.radialHoverPreset;
+			closeNatureRadial();
+			this.natureRadialOpenedFromCurrentPress = false;
+
+			if (selectedPreset) {
+				this.activateNaturePreset(selectedPreset);
+			} else {
+				this.updateViewportState();
+			}
+
+			return;
+		}
+
+		if (!this.natureRadialOpenedFromCurrentPress) {
+			this.activateNaturePreset(nextNatureUiState.activePreset ?? 'grass');
+		}
+
+		this.natureRadialOpenedFromCurrentPress = false;
 	}
 
 	private pruneUnusedArchivedMaterials(): void {
@@ -1151,23 +1284,72 @@ export class Game {
 	private toggleTimeOfDay(): void {
 		const nextTimeOfDay = this.sceneBundle.timeOfDay === 'day' ? 'night' : 'day';
 		applySceneTimeOfDay(this.sceneBundle, nextTimeOfDay);
+		this.voxelGiSystem.reset();
 		this.invalidateShadows();
 	}
 
+	private applyLightingMode(): void {
+		this.voxelGiSystem.setProfile(this.lightingMode === 'voxel-gi-stress' ? 'stress' : 'default');
+		this.voxelGiSystem.setEnabled(this.lightingMode !== 'classic');
+	}
+
 	private syncRenderMaterialUniforms(): void {
+		const surfaceLightingState = this.createVoxelSurfaceLightingState();
+
+		syncVoxelSurfaceMaterial(this.voxelOpaqueMaterial, surfaceLightingState);
+		syncVoxelSurfaceMaterial(this.voxelTransparentMaterial, surfaceLightingState);
+		this.voxelWaterMaterial.uniforms.uTime.value = performance.now() * 0.001;
+		this.voxelWaterMaterial.uniforms.uVoxelScale.value = VOXEL_WORLD_SIZE;
+		this.voxelWaterMaterial.uniforms.uSunDirection.value.copy(surfaceLightingState.sunDirection);
+		this.voxelWaterMaterial.uniforms.uSunColor.value.copy(surfaceLightingState.sunColor);
+		this.voxelWaterMaterial.uniforms.uSunIntensity.value = surfaceLightingState.sunIntensity;
+		this.voxelWaterMaterial.uniforms.uSkyColor.value.copy(this.sceneBundle.hemisphereLight.color);
+		this.voxelWaterMaterial.uniforms.uGroundColor.value.copy(
+			this.sceneBundle.hemisphereLight.groundColor
+		);
+		this.voxelWaterMaterial.uniforms.fogColor.value.copy(surfaceLightingState.fogColor);
+		this.voxelWaterMaterial.uniforms.fogNear.value = surfaceLightingState.fogNear;
+		this.voxelWaterMaterial.uniforms.fogFar.value = surfaceLightingState.fogFar;
+		this.voxelWaterMaterial.uniforms.uFogHeightStrength.value =
+			surfaceLightingState.heightFogStrength;
+		this.voxelWaterMaterial.uniforms.uFogHeightFalloff.value =
+			surfaceLightingState.heightFogFalloff;
+	}
+
+	private refreshSunDirection(): void {
 		const sunLight = this.sceneBundle.sunLight;
+
+		this.waterSunPosition.copy(sunLight.position);
+		this.waterSunTargetPosition.copy(sunLight.target.position);
+		this.waterSunDirection.copy(this.waterSunPosition).sub(this.waterSunTargetPosition).normalize();
+	}
+
+	private createGiLightingState(): VoxelGiLightingState {
+		const sunLight = this.sceneBundle.sunLight;
+
+		return {
+			skyColor: this.sceneBundle.hemisphereLight.color,
+			groundColor: this.sceneBundle.hemisphereLight.groundColor,
+			sunColor: sunLight.color,
+			sunDirection: this.waterSunDirection,
+			sunIntensity: sunLight.intensity,
+			timeOfDay: this.sceneBundle.timeOfDay
+		};
+	}
+
+	private createVoxelSurfaceLightingState(): VoxelSurfaceLightingState {
 		const fog = this.scene.fog;
 		const fogColor = fog instanceof THREE.Fog ? fog.color : new THREE.Color('#c2cfd1');
 		const fogNear = fog instanceof THREE.Fog ? fog.near : 24;
 		const fogFar = fog instanceof THREE.Fog ? fog.far : 84;
 		const heightFogStrength = this.sceneBundle.timeOfDay === 'night' ? 0.14 : 0.2;
 		const heightFogFalloff = this.sceneBundle.timeOfDay === 'night' ? 0.24 : 0.18;
+		const sunLight = this.sceneBundle.sunLight;
+		const giUniformState = this.voxelGiSystem.getUniformState();
 
-		this.waterSunPosition.copy(sunLight.position);
-		this.waterSunTargetPosition.copy(sunLight.target.position);
-		this.waterSunDirection.copy(this.waterSunPosition).sub(this.waterSunTargetPosition).normalize();
+		this.refreshSunDirection();
 
-		syncVoxelSurfaceMaterial(this.voxelOpaqueMaterial, {
+		return {
 			sunDirection: this.waterSunDirection,
 			sunColor: sunLight.color,
 			sunIntensity: sunLight.intensity,
@@ -1177,34 +1359,17 @@ export class Game {
 			fogNear,
 			fogFar,
 			heightFogStrength,
-			heightFogFalloff
-		});
-		syncVoxelSurfaceMaterial(this.voxelTransparentMaterial, {
-			sunDirection: this.waterSunDirection,
-			sunColor: sunLight.color,
-			sunIntensity: sunLight.intensity,
-			skyColor: this.sceneBundle.hemisphereLight.color,
-			groundColor: this.sceneBundle.hemisphereLight.groundColor,
-			fogColor,
-			fogNear,
-			fogFar,
-			heightFogStrength,
-			heightFogFalloff
-		});
-		this.voxelWaterMaterial.uniforms.uTime.value = performance.now() * 0.001;
-		this.voxelWaterMaterial.uniforms.uVoxelScale.value = VOXEL_WORLD_SIZE;
-		this.voxelWaterMaterial.uniforms.uSunDirection.value.copy(this.waterSunDirection);
-		this.voxelWaterMaterial.uniforms.uSunColor.value.copy(sunLight.color);
-		this.voxelWaterMaterial.uniforms.uSunIntensity.value = sunLight.intensity;
-		this.voxelWaterMaterial.uniforms.uSkyColor.value.copy(this.sceneBundle.hemisphereLight.color);
-		this.voxelWaterMaterial.uniforms.uGroundColor.value.copy(
-			this.sceneBundle.hemisphereLight.groundColor
-		);
-		this.voxelWaterMaterial.uniforms.fogColor.value.copy(fogColor);
-		this.voxelWaterMaterial.uniforms.fogNear.value = fogNear;
-		this.voxelWaterMaterial.uniforms.fogFar.value = fogFar;
-		this.voxelWaterMaterial.uniforms.uFogHeightStrength.value = heightFogStrength;
-		this.voxelWaterMaterial.uniforms.uFogHeightFalloff.value = heightFogFalloff;
+			heightFogFalloff,
+			giEnabled: this.lightingMode !== 'classic' && giUniformState.enabled,
+			giAtlas: giUniformState.atlas,
+			giAtlasSize: giUniformState.atlasSize,
+			giWorldOrigin: giUniformState.worldOrigin,
+			giVolumeSize: giUniformState.volumeSize,
+			giCellSize: giUniformState.cellSize,
+			giIntensity: giUniformState.intensity,
+			giClassicBounceScale: giUniformState.classicBounceScale,
+			giVisibilityFloor: giUniformState.visibilityFloor
+		};
 	}
 
 	private capturePaletteState(): SerializedVoxelPaletteState {

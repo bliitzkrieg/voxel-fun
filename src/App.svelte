@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 
-	import { Game } from '$lib/engine/game';
+	import { Game, type LightingMode } from '$lib/engine/game';
 	import {
 		closeMaterialManager,
 		setMaterialManagerAssignmentSlot,
@@ -11,6 +11,7 @@
 	import {
 		closeNaturePanel,
 		setNaturePreset,
+		setNatureRadialHoverPreset,
 		subscribeNatureUiState,
 		type NatureUiState
 	} from '$lib/ui/natureState';
@@ -20,11 +21,14 @@
 		type PropUiState
 	} from '$lib/ui/propManagerState';
 	import {
+		DEFAULT_NATURE_BUSH_SETTINGS,
 		DEFAULT_NATURE_FLOWER_SETTINGS,
 		DEFAULT_NATURE_GRASS_SETTINGS,
 		DEFAULT_NATURE_TREE_SETTINGS
 	} from '$lib/nature/natureTypes';
 	import type {
+		NatureBushDensity,
+		NatureBushSize,
 		NatureFlowerColorMode,
 		NatureGrassHeightVariance,
 		NaturePreset,
@@ -57,14 +61,18 @@
 	});
 	let natureUiState = $state<NatureUiState>({
 		open: false,
+		radialOpen: false,
+		radialHoverPreset: null,
 		activePreset: 'grass',
 		activeTool: null,
 		grassSettings: { ...DEFAULT_NATURE_GRASS_SETTINGS },
+		bushSettings: { ...DEFAULT_NATURE_BUSH_SETTINGS },
 		flowerSettings: { ...DEFAULT_NATURE_FLOWER_SETTINGS },
 		treeSettings: { ...DEFAULT_NATURE_TREE_SETTINGS }
 	});
 	let propLibraryState = $state<PropLibraryState>({ props: [] });
 	let selectedMaterialId = $state(0);
+	let lightingMode = $state<LightingMode>('voxel-gi');
 	let newMaterialName = $state('');
 	let newMaterialColor = $state('#74ffd8');
 	let newMaterialOpacity = $state(100);
@@ -95,6 +103,24 @@
 		},
 		{ value: 'large', label: 'Large', copy: 'Taller canopy with deeper branch spread.' }
 	];
+	const bushSizeOptions: Array<{ value: NatureBushSize; label: string; copy: string }> = [
+		{ value: 'small', label: 'Small', copy: 'Low garden shrub with a tighter silhouette.' },
+		{
+			value: 'medium',
+			label: 'Medium',
+			copy: 'Rounded yard bush with visible side lobes and branch pockets.'
+		},
+		{ value: 'large', label: 'Large', copy: 'Broader hedge-like bush with heavier canopy spread.' }
+	];
+	const bushDensityOptions: Array<{ value: NatureBushDensity; label: string; copy: string }> = [
+		{ value: 'sparse', label: 'Sparse', copy: 'More air gaps and more visible woody core.' },
+		{
+			value: 'balanced',
+			label: 'Balanced',
+			copy: 'Layered foliage with some branch reveal and a readable outline.'
+		},
+		{ value: 'lush', label: 'Lush', copy: 'Heavier foliage fill with wider, fuller clumps.' }
+	];
 	const flowerColorOptions: Array<{
 		value: NatureFlowerColorMode;
 		label: string;
@@ -117,6 +143,7 @@
 		const currentGame = new Game(container);
 		game = currentGame;
 		currentGame.init();
+		lightingMode = currentGame.getLightingMode();
 
 		const unsubscribeMaterialManager = subscribeMaterialManagerUiState((state) => {
 			materialManagerState = state;
@@ -193,6 +220,15 @@
 		devWorldStatus = (await game.importWorldFromDisk())
 			? 'World imported and saved locally.'
 			: 'Import was canceled or invalid.';
+	}
+
+	function handleLightingModeChange(value: string): void {
+		if (value !== 'voxel-gi' && value !== 'voxel-gi-stress' && value !== 'classic') {
+			return;
+		}
+
+		game?.setLightingMode(value);
+		lightingMode = value;
 	}
 
 	function handleCloseMaterialManager(): void {
@@ -416,6 +452,32 @@
 		game?.updateNatureGrassSettings({ seedOffset });
 	}
 
+	function handleNatureBushSizeChange(value: string): void {
+		if (value !== 'small' && value !== 'medium' && value !== 'large') {
+			return;
+		}
+
+		game?.updateNatureBushSettings({ size: value });
+	}
+
+	function handleNatureBushDensityChange(value: string): void {
+		if (value !== 'sparse' && value !== 'balanced' && value !== 'lush') {
+			return;
+		}
+
+		game?.updateNatureBushSettings({ density: value });
+	}
+
+	function handleNatureBushSeedChange(value: string): void {
+		const seedOffset = Number.parseInt(value, 10);
+
+		if (!Number.isFinite(seedOffset)) {
+			return;
+		}
+
+		game?.updateNatureBushSettings({ seedOffset });
+	}
+
 	function handleNatureFlowerRadiusChange(value: string): void {
 		const radius = Number.parseInt(value, 10);
 
@@ -540,10 +602,16 @@
 		return `${Math.round(value * 100)}%`;
 	}
 
+	function handleNatureRadialHover(preset: NaturePreset | null): void {
+		setNatureRadialHoverPreset(preset);
+	}
+
 	function getNaturePresetTitle(preset: NaturePreset): string {
 		switch (preset) {
 			case 'grass':
 				return 'Grass Brush';
+			case 'bushes':
+				return 'Bush Generator';
 			case 'flowers':
 				return 'Flower Brush';
 			default:
@@ -555,6 +623,8 @@
 		switch (natureUiState.activeTool) {
 			case 'grass-paint':
 				return 'Grass Painting';
+			case 'bush-place':
+				return 'Bush Planting';
 			case 'flower-paint':
 				return 'Flower Painting';
 			default:
@@ -585,6 +655,19 @@
 				<button class="dev-world-button" type="button" onclick={handleExportWorld}>Export</button>
 				<button class="dev-world-button" type="button" onclick={handleImportWorld}>Import</button>
 			</div>
+			<label class="dev-world-field">
+				<span class="dev-world-field-label">Lighting</span>
+				<select
+					class="dev-world-select"
+					value={lightingMode}
+					onchange={(event) =>
+						handleLightingModeChange((event.currentTarget as HTMLSelectElement).value)}
+				>
+					<option value="voxel-gi">Ray GI</option>
+					<option value="voxel-gi-stress">Ray GI Stress</option>
+					<option value="classic">Classic</option>
+				</select>
+			</label>
 			<div class="dev-world-status">{devWorldStatus}</div>
 		</div>
 	{/if}
@@ -602,8 +685,10 @@
 				<span class="dock-copy">Move</span>
 				<span class="keycap">Shift</span>
 				<span class="dock-copy">Sprint</span>
+				<span class="keycap">G</span>
+				<span class="dock-copy">Toggle Fly</span>
 				<span class="keycap">Ctrl</span>
-				<span class="dock-copy">Crouch</span>
+				<span class="dock-copy">Toggle Crouch</span>
 				<span class="keycap">Space</span>
 				<span class="dock-copy">Jump</span>
 			</div>
@@ -630,12 +715,10 @@
 				<span class="dock-copy">Hotbar</span>
 				<span class="keycap">L</span>
 				<span class="dock-copy">Day/Night</span>
-				<span class="keycap">G</span>
-				<span class="dock-copy">Grass</span>
-				<span class="keycap">F</span>
-				<span class="dock-copy">Flowers</span>
-				<span class="keycap">T</span>
-				<span class="dock-copy">Trees</span>
+				<span class="keycap">T Tap</span>
+				<span class="dock-copy">Last Nature</span>
+				<span class="keycap">T Hold</span>
+				<span class="dock-copy">Nature Wheel</span>
 				<span class="keycap">M</span>
 				<span class="dock-copy">Materials</span>
 				<span class="keycap">N</span>
@@ -960,6 +1043,73 @@
 		</div>
 	{/if}
 
+	{#if natureUiState.radialOpen}
+		<div
+			class="nature-radial"
+			role="dialog"
+			aria-modal="true"
+			aria-label="Nature quick picker"
+			tabindex="-1"
+			onmouseleave={() => handleNatureRadialHover(null)}
+		>
+			<div class="nature-radial-backdrop"></div>
+			<div class="nature-radial-wheel">
+				<button
+					class:nature-radial-option-active={natureUiState.radialHoverPreset === 'trees' ||
+						(natureUiState.radialHoverPreset === null && natureUiState.activePreset === 'trees')}
+					class="nature-radial-option nature-radial-option-top"
+					type="button"
+					onmouseenter={() => handleNatureRadialHover('trees')}
+					onfocus={() => handleNatureRadialHover('trees')}
+				>
+					<span class="nature-radial-kicker">Stamp</span>
+					<span class="nature-radial-label">Trees</span>
+				</button>
+				<button
+					class:nature-radial-option-active={natureUiState.radialHoverPreset === 'flowers' ||
+						(natureUiState.radialHoverPreset === null && natureUiState.activePreset === 'flowers')}
+					class="nature-radial-option nature-radial-option-right"
+					type="button"
+					onmouseenter={() => handleNatureRadialHover('flowers')}
+					onfocus={() => handleNatureRadialHover('flowers')}
+				>
+					<span class="nature-radial-kicker">Brush</span>
+					<span class="nature-radial-label">Flowers</span>
+				</button>
+				<button
+					class:nature-radial-option-active={natureUiState.radialHoverPreset === 'grass' ||
+						(natureUiState.radialHoverPreset === null && natureUiState.activePreset === 'grass')}
+					class="nature-radial-option nature-radial-option-bottom"
+					type="button"
+					onmouseenter={() => handleNatureRadialHover('grass')}
+					onfocus={() => handleNatureRadialHover('grass')}
+				>
+					<span class="nature-radial-kicker">Brush</span>
+					<span class="nature-radial-label">Grass</span>
+				</button>
+				<button
+					class:nature-radial-option-active={natureUiState.radialHoverPreset === 'bushes' ||
+						(natureUiState.radialHoverPreset === null && natureUiState.activePreset === 'bushes')}
+					class="nature-radial-option nature-radial-option-left"
+					type="button"
+					onmouseenter={() => handleNatureRadialHover('bushes')}
+					onfocus={() => handleNatureRadialHover('bushes')}
+				>
+					<span class="nature-radial-kicker">Stamp</span>
+					<span class="nature-radial-label">Bushes</span>
+				</button>
+				<div class="nature-radial-core">
+					<div class="nature-radial-core-kicker">Hold `T`</div>
+					<div class="nature-radial-core-title">
+						{getNaturePresetTitle(
+							natureUiState.radialHoverPreset ?? natureUiState.activePreset ?? 'grass'
+						)}
+					</div>
+				</div>
+			</div>
+		</div>
+	{/if}
+
 	{#if natureUiState.open}
 		<div class="nature-overlay" role="dialog" aria-modal="true" aria-label="Nature Library">
 			<button
@@ -972,11 +1122,12 @@
 			<section class="nature-panel">
 				<header class="nature-panel-head">
 					<div>
-						<div class="nature-panel-kicker">Ground Cover And Canopy Kit</div>
+						<div class="nature-panel-kicker">Ground Cover, Shrub, And Canopy Kit</div>
 						<h2 class="nature-panel-title">Nature</h2>
 						<p class="nature-panel-copy">
-							Paint sparse teardown-style grass, scatter colorful procedural flowers, or stamp a
-							full tree with rough bark, upward branches, and layered leaf scatter.
+							Paint sparse teardown-style grass, scatter colorful procedural flowers, or stamp
+							procedural bushes and trees with bark variation, branch pockets, and layered leaf
+							scatter.
 						</p>
 					</div>
 
@@ -1001,7 +1152,7 @@
 								<div class="nature-section-label">Starter Presets</div>
 								<div class="nature-section-title">Ready To Paint</div>
 							</div>
-							<div class="nature-section-note">Every brush stroke writes plain world voxels.</div>
+							<div class="nature-section-note">Every preset writes plain world voxels.</div>
 						</div>
 
 						<div class="nature-card-grid">
@@ -1040,6 +1191,46 @@
 									onclick={() => handleActivateNaturePreset('grass')}
 								>
 									Start Grass Brush
+								</button>
+							</article>
+
+							<article
+								class:nature-card-active={natureUiState.activePreset === 'bushes'}
+								class="nature-card"
+							>
+								<button
+									class="nature-card-main"
+									type="button"
+									onclick={() => handleSelectNaturePreset('bushes')}
+								>
+									<div class="nature-card-art nature-card-art-bush" aria-hidden="true">
+										<span class="nature-bush-shadow"></span>
+										<span class="nature-bush-leaf nature-bush-leaf-left"></span>
+										<span class="nature-bush-leaf nature-bush-leaf-center"></span>
+										<span class="nature-bush-leaf nature-bush-leaf-right"></span>
+										<span class="nature-bush-branch nature-bush-branch-left"></span>
+										<span class="nature-bush-branch nature-bush-branch-right"></span>
+									</div>
+									<div class="nature-card-copy">
+										<div class="nature-card-kicker">Generator Preset</div>
+										<div class="nature-card-title">Bushes</div>
+										<p class="nature-card-text">
+											Stamps compact shrubs with irregular lobes, visible woody pockets, and rounded
+											foliage silhouettes that stay wider than they are tall.
+										</p>
+									</div>
+								</button>
+								<div class="nature-card-meta">
+									<span>Single-click place</span>
+									<span>Irregular shrub lobes</span>
+									<span>Leaf and bark reuse</span>
+								</div>
+								<button
+									class="nature-card-activate"
+									type="button"
+									onclick={() => handleActivateNaturePreset('bushes')}
+								>
+									Start Bush Tool
 								</button>
 							</article>
 
@@ -1136,9 +1327,11 @@
 							<div class="nature-settings-badge">
 								{natureUiState.activePreset === 'grass'
 									? 'Patch painter'
-									: natureUiState.activePreset === 'flowers'
-										? 'Bloom scatter'
-										: 'Procedural stamp'}
+									: natureUiState.activePreset === 'bushes'
+										? 'Shrub stamp'
+										: natureUiState.activePreset === 'flowers'
+											? 'Bloom scatter'
+											: 'Procedural stamp'}
 							</div>
 						</div>
 
@@ -1230,6 +1423,79 @@
 								<div class="nature-summary">
 									The brush only fills empty cells above exposed ground. Repainting refreshes
 									existing grass voxels without carving into terrain.
+								</div>
+							</div>
+						{:else if natureUiState.activePreset === 'bushes'}
+							{@const bushSettings = natureUiState.bushSettings}
+							{@const activeBushSize =
+								bushSizeOptions.find((option) => option.value === bushSettings.size) ??
+								bushSizeOptions[1]}
+							{@const activeBushDensity =
+								bushDensityOptions.find((option) => option.value === bushSettings.density) ??
+								bushDensityOptions[1]}
+
+							<div class="nature-settings-body">
+								<div class="nature-field">
+									<div class="nature-field-row">
+										<span class="nature-field-label">Bush Size</span>
+										<span class="nature-field-value">{activeBushSize.label}</span>
+									</div>
+									<div class="nature-segmented">
+										{#each bushSizeOptions as option (option.value)}
+											<button
+												class:nature-segment-active={option.value === bushSettings.size}
+												class="nature-segment"
+												type="button"
+												onclick={() => handleNatureBushSizeChange(option.value)}
+											>
+												{option.label}
+											</button>
+										{/each}
+									</div>
+									<div class="nature-helper-copy">{activeBushSize.copy}</div>
+								</div>
+
+								<div class="nature-field">
+									<div class="nature-field-row">
+										<span class="nature-field-label">Foliage Fill</span>
+										<span class="nature-field-value">{activeBushDensity.label}</span>
+									</div>
+									<div class="nature-segmented">
+										{#each bushDensityOptions as option (option.value)}
+											<button
+												class:nature-segment-active={option.value === bushSettings.density}
+												class="nature-segment"
+												type="button"
+												onclick={() => handleNatureBushDensityChange(option.value)}
+											>
+												{option.label}
+											</button>
+										{/each}
+									</div>
+									<div class="nature-helper-copy">{activeBushDensity.copy}</div>
+								</div>
+
+								<label class="nature-field">
+									<div class="nature-field-row">
+										<span class="nature-field-label">Seed Offset</span>
+										<span class="nature-field-value">{bushSettings.seedOffset}</span>
+									</div>
+									<input
+										class="nature-number"
+										type="number"
+										min="0"
+										max="9999"
+										step="1"
+										value={bushSettings.seedOffset}
+										oninput={(event) =>
+											handleNatureBushSeedChange((event.currentTarget as HTMLInputElement).value)}
+									/>
+								</label>
+
+								<div class="nature-summary">
+									Bushes stamp one grounded shrub at a time. They can cleanly replace grass,
+									flowers, and loose leaf clutter, but they skip placement if the volume would cut
+									into solid structures or water.
 								</div>
 							</div>
 						{:else if natureUiState.activePreset === 'flowers'}
@@ -1379,9 +1645,11 @@
 							>
 								{natureUiState.activePreset === 'grass'
 									? 'Use Grass Brush'
-									: natureUiState.activePreset === 'flowers'
-										? 'Use Flower Brush'
-										: 'Use Tree Tool'}
+									: natureUiState.activePreset === 'bushes'
+										? 'Use Bush Tool'
+										: natureUiState.activePreset === 'flowers'
+											? 'Use Flower Brush'
+											: 'Use Tree Tool'}
 							</button>
 						</div>
 					</section>
@@ -1521,18 +1789,20 @@
 		</div>
 	{/if}
 
-	{#if natureUiState.activeTool && !natureUiState.open && !propUiState.placementActive}
+	{#if natureUiState.activeTool && !natureUiState.open && !natureUiState.radialOpen && !propUiState.placementActive}
 		<div class="nature-tool-banner">
 			<div class="nature-tool-chip">Nature Live</div>
 			<div class="nature-tool-title">{getNatureToolTitle()}</div>
 			<div class="nature-tool-row">
-				{#if natureUiState.activeTool === 'tree-place'}
+				{#if natureUiState.activeTool === 'tree-place' || natureUiState.activeTool === 'bush-place'}
 					<span class="keycap">LMB</span>
 					<span class="dock-copy">Plant</span>
 				{:else}
 					<span class="keycap">LMB Drag</span>
 					<span class="dock-copy">Paint</span>
 				{/if}
+				<span class="keycap">T Hold</span>
+				<span class="dock-copy">Wheel</span>
 				<span class="keycap">N</span>
 				<span class="dock-copy">Tune</span>
 				<span class="keycap">Esc</span>
@@ -1679,6 +1949,33 @@
 		display: grid;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: 8px;
+	}
+
+	.dev-world-field {
+		display: grid;
+		gap: 6px;
+		margin-top: 10px;
+	}
+
+	.dev-world-field-label {
+		color: rgba(216, 235, 228, 0.72);
+		font-size: 0.7rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.dev-world-select {
+		width: 100%;
+		padding: 10px 12px;
+		border: 1px solid rgba(255, 255, 255, 0.14);
+		border-radius: 12px;
+		background:
+			linear-gradient(180deg, rgba(240, 251, 248, 0.12), rgba(240, 251, 248, 0.04)),
+			rgba(11, 19, 22, 0.62);
+		color: #eef8f4;
+		font: inherit;
+		font-size: 0.8rem;
 	}
 
 	.dev-world-button {
@@ -2446,6 +2743,175 @@
 		overflow-wrap: anywhere;
 	}
 
+	.nature-radial {
+		position: absolute;
+		inset: 0;
+		z-index: 4;
+		display: grid;
+		place-items: center;
+		pointer-events: auto;
+	}
+
+	.nature-radial-backdrop {
+		position: absolute;
+		inset: 0;
+		background:
+			linear-gradient(180deg, rgba(8, 12, 9, 0.18), rgba(8, 12, 9, 0.46)),
+			radial-gradient(circle at center, rgba(184, 226, 124, 0.08), transparent 34%);
+		backdrop-filter: blur(8px);
+		pointer-events: none;
+	}
+
+	.nature-radial-wheel {
+		position: relative;
+		width: min(520px, calc(100vw - 40px));
+		height: min(520px, calc(100vw - 40px));
+		--nature-radial-distance: 156px;
+		--nature-radial-option-width: 138px;
+		--nature-radial-core-width: 132px;
+		pointer-events: none;
+	}
+
+	.nature-radial-wheel::before {
+		content: '';
+		position: absolute;
+		left: 50%;
+		top: 50%;
+		width: calc(var(--nature-radial-distance) * 2 + 88px);
+		height: calc(var(--nature-radial-distance) * 2 + 88px);
+		transform: translate(-50%, -50%);
+		border: 1px solid rgba(231, 245, 219, 0.08);
+		border-radius: 999px;
+		background:
+			radial-gradient(circle, rgba(162, 209, 109, 0.05), transparent 62%),
+			conic-gradient(
+				from 0deg,
+				rgba(162, 209, 109, 0.08),
+				rgba(255, 255, 255, 0.02),
+				rgba(162, 209, 109, 0.08),
+				rgba(255, 255, 255, 0.02),
+				rgba(162, 209, 109, 0.08)
+			);
+		box-shadow:
+			inset 0 0 0 1px rgba(255, 255, 255, 0.02),
+			0 0 36px rgba(107, 149, 68, 0.08);
+	}
+
+	.nature-radial-option {
+		position: absolute;
+		display: grid;
+		gap: 4px;
+		width: var(--nature-radial-option-width);
+		padding: 14px 16px;
+		border: 1px solid rgba(231, 245, 219, 0.16);
+		border-radius: 22px;
+		background:
+			linear-gradient(180deg, rgba(16, 25, 17, 0.92), rgba(16, 25, 17, 0.76)),
+			radial-gradient(circle at top, rgba(162, 209, 109, 0.16), transparent 58%);
+		box-shadow:
+			0 22px 50px rgba(4, 8, 5, 0.34),
+			inset 0 1px 0 rgba(255, 255, 255, 0.08);
+		color: #eef6ea;
+		text-align: left;
+		pointer-events: auto;
+		cursor: pointer;
+		transform: var(--nature-radial-transform, none);
+		transition:
+			transform 120ms ease,
+			border-color 120ms ease,
+			box-shadow 120ms ease;
+	}
+
+	.nature-radial-option:hover,
+	.nature-radial-option-active {
+		transform: var(--nature-radial-active-transform, var(--nature-radial-transform, none));
+		border-color: rgba(185, 223, 126, 0.52);
+		box-shadow:
+			0 26px 58px rgba(4, 8, 5, 0.4),
+			0 0 0 1px rgba(185, 223, 126, 0.14),
+			inset 0 1px 0 rgba(255, 255, 255, 0.1);
+	}
+
+	.nature-radial-option-top {
+		left: 50%;
+		top: 50%;
+		--nature-radial-transform: translate(-50%, -50%)
+			translateY(calc(var(--nature-radial-distance) * -1));
+		--nature-radial-active-transform: translate(-50%, -50%)
+			translateY(calc(var(--nature-radial-distance) * -1 - 4px)) scale(1.03);
+	}
+
+	.nature-radial-option-right {
+		top: 50%;
+		left: 50%;
+		--nature-radial-transform: translate(-50%, -50%) translateX(var(--nature-radial-distance));
+		--nature-radial-active-transform: translate(-50%, -50%)
+			translateX(calc(var(--nature-radial-distance) + 4px)) scale(1.03);
+	}
+
+	.nature-radial-option-bottom {
+		left: 50%;
+		top: 50%;
+		--nature-radial-transform: translate(-50%, -50%) translateY(var(--nature-radial-distance));
+		--nature-radial-active-transform: translate(-50%, -50%)
+			translateY(calc(var(--nature-radial-distance) + 4px)) scale(1.03);
+	}
+
+	.nature-radial-option-left {
+		top: 50%;
+		left: 50%;
+		--nature-radial-transform: translate(-50%, -50%)
+			translateX(calc(var(--nature-radial-distance) * -1));
+		--nature-radial-active-transform: translate(-50%, -50%)
+			translateX(calc(var(--nature-radial-distance) * -1 - 4px)) scale(1.03);
+	}
+
+	.nature-radial-kicker,
+	.nature-radial-core-kicker {
+		color: rgba(202, 223, 174, 0.72);
+		font-size: 0.62rem;
+		font-weight: 700;
+		letter-spacing: 0.18em;
+		text-transform: uppercase;
+	}
+
+	.nature-radial-label {
+		font-size: 0.92rem;
+		font-weight: 800;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.nature-radial-core-title {
+		font-size: 0.8rem;
+		font-weight: 800;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		line-height: 1.25;
+	}
+
+	.nature-radial-core {
+		position: absolute;
+		left: 50%;
+		top: 50%;
+		display: grid;
+		justify-items: center;
+		gap: 8px;
+		width: var(--nature-radial-core-width);
+		padding: 16px 18px;
+		transform: translate(-50%, -50%);
+		border: 1px solid rgba(231, 245, 219, 0.18);
+		border-radius: 32px;
+		background:
+			linear-gradient(180deg, rgba(16, 25, 17, 0.96), rgba(16, 25, 17, 0.82)),
+			radial-gradient(circle at top, rgba(162, 209, 109, 0.2), transparent 60%);
+		box-shadow:
+			0 28px 64px rgba(4, 8, 5, 0.4),
+			inset 0 1px 0 rgba(255, 255, 255, 0.08);
+		text-align: center;
+		color: #eef6ea;
+	}
+
 	.nature-overlay {
 		position: absolute;
 		inset: 0;
@@ -2644,7 +3110,7 @@
 
 	.nature-card-grid {
 		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-columns: repeat(4, minmax(0, 1fr));
 		gap: 14px;
 		min-height: 0;
 	}
@@ -2746,6 +3212,75 @@
 		height: 50px;
 		background: linear-gradient(180deg, rgba(197, 227, 137, 0.94), rgba(104, 145, 60, 0.98));
 		transform: rotate(10deg);
+	}
+
+	.nature-card-art-bush::before {
+		content: '';
+		position: absolute;
+		inset: auto 12% 18px;
+		height: 24px;
+		border-radius: 999px;
+		background: radial-gradient(circle, rgba(70, 92, 48, 0.5), transparent 68%);
+		filter: blur(12px);
+	}
+
+	.nature-bush-shadow {
+		position: absolute;
+		inset: auto 22% 24px;
+		height: 20px;
+		border-radius: 999px;
+		background: radial-gradient(circle, rgba(25, 33, 18, 0.62), transparent 72%);
+		filter: blur(8px);
+	}
+
+	.nature-bush-leaf {
+		position: absolute;
+		border-radius: 999px;
+		background: linear-gradient(180deg, rgba(154, 195, 96, 0.92), rgba(62, 99, 42, 0.98));
+		box-shadow: 0 0 20px rgba(93, 145, 61, 0.14);
+	}
+
+	.nature-bush-leaf-left {
+		left: 18%;
+		bottom: 38px;
+		width: 58px;
+		height: 54px;
+	}
+
+	.nature-bush-leaf-center {
+		left: calc(50% - 38px);
+		bottom: 34px;
+		width: 76px;
+		height: 64px;
+		background: linear-gradient(180deg, rgba(168, 206, 108, 0.94), rgba(72, 110, 47, 0.98));
+	}
+
+	.nature-bush-leaf-right {
+		right: 18%;
+		bottom: 42px;
+		width: 54px;
+		height: 50px;
+	}
+
+	.nature-bush-branch {
+		position: absolute;
+		bottom: 34px;
+		width: 14px;
+		border-radius: 999px;
+		background: linear-gradient(180deg, rgba(111, 79, 49, 0.92), rgba(65, 43, 26, 0.98));
+		box-shadow: inset -3px 0 0 rgba(44, 28, 16, 0.24);
+	}
+
+	.nature-bush-branch-left {
+		left: 34%;
+		height: 34px;
+		transform: rotate(-16deg);
+	}
+
+	.nature-bush-branch-right {
+		right: 32%;
+		height: 28px;
+		transform: rotate(16deg);
 	}
 
 	.nature-tree-trunk {
@@ -3662,6 +4197,32 @@
 	}
 
 	@media (max-width: 720px) {
+		.nature-radial-wheel {
+			width: min(360px, calc(100vw - 24px));
+			height: min(360px, calc(100vw - 24px));
+			--nature-radial-distance: 114px;
+			--nature-radial-option-width: 106px;
+			--nature-radial-core-width: 112px;
+		}
+
+		.nature-radial-option {
+			padding: 11px 12px;
+			border-radius: 18px;
+		}
+
+		.nature-radial-core {
+			padding: 12px 14px;
+			border-radius: 26px;
+		}
+
+		.nature-radial-label {
+			font-size: 0.8rem;
+		}
+
+		.nature-radial-core-title {
+			font-size: 0.72rem;
+		}
+
 		.hud-frame-top {
 			flex-direction: column;
 			align-items: flex-start;

@@ -1,9 +1,11 @@
-export type NaturePreset = 'grass' | 'trees' | 'flowers';
-export type NatureActiveTool = 'grass-paint' | 'tree-place' | 'flower-paint';
-export type NatureEditorTool = 'nature-grass' | 'nature-tree' | 'nature-flower';
+export type NaturePreset = 'grass' | 'trees' | 'flowers' | 'bushes';
+export type NatureActiveTool = 'grass-paint' | 'tree-place' | 'flower-paint' | 'bush-place';
+export type NatureEditorTool = 'nature-grass' | 'nature-tree' | 'nature-flower' | 'nature-bush';
 export type NatureRole = 'grass' | 'leaf' | 'bark' | 'flower';
 export type NatureGrassHeightVariance = 'low' | 'medium' | 'high';
 export type NatureTreeSize = 'small' | 'medium' | 'large';
+export type NatureBushSize = 'small' | 'medium' | 'large';
+export type NatureBushDensity = 'sparse' | 'balanced' | 'lush';
 export type NatureFlowerColorMode = 'random' | 'scarlet' | 'cobalt' | 'amber' | 'violet';
 
 export interface NatureGrassSettings {
@@ -15,6 +17,12 @@ export interface NatureGrassSettings {
 
 export interface NatureTreeSettings {
 	size: NatureTreeSize;
+	seedOffset: number;
+}
+
+export interface NatureBushSettings {
+	size: NatureBushSize;
+	density: NatureBushDensity;
 	seedOffset: number;
 }
 
@@ -37,6 +45,12 @@ export const DEFAULT_NATURE_TREE_SETTINGS: NatureTreeSettings = {
 	seedOffset: 0
 };
 
+export const DEFAULT_NATURE_BUSH_SETTINGS: NatureBushSettings = {
+	size: 'medium',
+	density: 'balanced',
+	seedOffset: 0
+};
+
 export const DEFAULT_NATURE_FLOWER_SETTINGS: NatureFlowerSettings = {
 	radius: 4,
 	density: 0.34,
@@ -48,6 +62,8 @@ export function getNatureToolForPreset(preset: NaturePreset): NatureActiveTool {
 	switch (preset) {
 		case 'grass':
 			return 'grass-paint';
+		case 'bushes':
+			return 'bush-place';
 		case 'flowers':
 			return 'flower-paint';
 		default:
@@ -59,6 +75,8 @@ export function getNatureEditorToolForPreset(preset: NaturePreset): NatureEditor
 	switch (preset) {
 		case 'grass':
 			return 'nature-grass';
+		case 'bushes':
+			return 'nature-bush';
 		case 'flowers':
 			return 'nature-flower';
 		default:
@@ -71,6 +89,9 @@ export function getNaturePresetForTool(tool: NatureActiveTool | NatureEditorTool
 		case 'grass-paint':
 		case 'nature-grass':
 			return 'grass';
+		case 'bush-place':
+		case 'nature-bush':
+			return 'bushes';
 		case 'flower-paint':
 		case 'nature-flower':
 			return 'flowers';

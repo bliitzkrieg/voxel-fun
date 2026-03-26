@@ -117,8 +117,8 @@ export function createGameScene(): SceneBundle {
 	const sunTarget = new THREE.Object3D();
 	const skyDome = createSkyDome();
 
-	sunLight.position.set(26, 32, 12);
-	sunTarget.position.set(10, 4, 14);
+	sunLight.position.set(42, 18, 8);
+	sunTarget.position.set(16, 5, 30);
 	sunLight.target = sunTarget;
 	sunLight.castShadow = true;
 	sunLight.shadow.mapSize.set(2048, 2048);
@@ -186,7 +186,7 @@ const DAY_PRESET: ScenePreset = {
 	hemisphereGroundColor: '#867c70',
 	hemisphereIntensity: 0.62,
 	sunColor: '#ffe1bc',
-	sunIntensity: 2.05,
+	sunIntensity: 1.55,
 	fillColor: '#bfd6e4',
 	fillIntensity: 0.52,
 	skyZenithColor: '#6ea3d2',
@@ -194,7 +194,7 @@ const DAY_PRESET: ScenePreset = {
 	skyGroundColor: '#f6dcc3',
 	skyGlowColor: '#ffe9bf',
 	skyGlowFocus: 110,
-	skyGlowIntensity: 0.95,
+	skyGlowIntensity: 0.62,
 	skyStarIntensity: 0
 };
 
