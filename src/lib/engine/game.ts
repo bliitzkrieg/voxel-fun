@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 
 import { EditorController } from '$lib/editor/editorController';
 import { createChunkBoundsHelper, disposeDebugObject } from '$lib/debug/debugDraw';
@@ -81,11 +84,15 @@ const BULK_CHUNK_SYNC_PER_FRAME = 2;
 const BULK_CHUNK_SYNC_FRAME_BUDGET_MS = 2;
 const BACKGROUND_SHADOW_REFRESH_INTERVAL_MS = 125;
 const UNDO_IMMEDIATE_CHUNK_SYNC_LIMIT = 20;
+const BLOOM_STRENGTH = 0.18;
+const BLOOM_RADIUS = 0.45;
+const BLOOM_THRESHOLD = 0.86;
 
 export class Game {
 	scene!: THREE.Scene;
 	camera!: THREE.PerspectiveCamera;
 	renderer!: THREE.WebGLRenderer;
+	composer!: EffectComposer;
 
 	world!: VoxelWorld;
 	player!: PlayerController;
@@ -97,6 +104,7 @@ export class Game {
 	voxelTransparentMaterial!: VoxelSurfaceMaterial;
 	voxelWaterMaterial!: WaterShaderMaterial;
 	voxelGlowMaterial!: THREE.MeshBasicMaterial;
+	bloomPass!: UnrealBloomPass;
 
 	private readonly container: HTMLElement;
 	private input!: InputState;
@@ -147,6 +155,15 @@ export class Game {
 		this.renderer.domElement.style.display = 'block';
 		this.renderer.domElement.style.width = '100%';
 		this.renderer.domElement.style.height = '100%';
+		this.composer = new EffectComposer(this.renderer);
+		this.composer.addPass(new RenderPass(this.scene, this.camera));
+		this.bloomPass = new UnrealBloomPass(
+			new THREE.Vector2(1, 1),
+			BLOOM_STRENGTH,
+			BLOOM_RADIUS,
+			BLOOM_THRESHOLD
+		);
+		this.composer.addPass(this.bloomPass);
 
 		this.container.style.position = 'relative';
 		this.container.style.width = '100%';
@@ -304,7 +321,7 @@ export class Game {
 	render(): void {
 		this.stats.recordFrame();
 		this.syncRenderMaterialUniforms();
-		this.renderer.render(this.scene, this.camera);
+		this.composer.render();
 	}
 
 	dispose(): void {
@@ -322,6 +339,7 @@ export class Game {
 		this.sceneBundle.skyDome.geometry.dispose();
 		this.sceneBundle.skyDome.material.dispose();
 
+		this.composer?.dispose();
 		this.voxelOpaqueMaterial?.dispose();
 		this.voxelTransparentMaterial?.dispose();
 		this.voxelWaterMaterial?.dispose();
@@ -564,7 +582,12 @@ export class Game {
 
 		this.camera.aspect = width / height;
 		this.camera.updateProjectionMatrix();
+		const pixelRatio = Math.min(window.devicePixelRatio, 1.25);
+
+		this.renderer.setPixelRatio(pixelRatio);
 		this.renderer.setSize(width, height, false);
+		this.composer.setPixelRatio(pixelRatio);
+		this.composer.setSize(width, height);
 	}
 
 	private invalidateShadows(): void {
